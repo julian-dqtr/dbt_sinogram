@@ -7,5 +7,5 @@ venv/
 __pycache__/
 *.pyc
 
-# Ignore VS Code local settings (optionnel mais conseillé)
+# Ignore VS Code local settings
 .vscode/
