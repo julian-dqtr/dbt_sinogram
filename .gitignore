@@ -3,9 +3,42 @@
 env/
 venv/
 
-# Ignore Python cache
+# Ignore Python cache and compilation files
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
 
 # Ignore VS Code local settings
 .vscode/
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore standard images and plots
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.tif
+*.tiff
+
+# Ignore medical imaging data and large datasets
+*.dcm
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+*.zarr
+data/
+datasets/
+
+# Ignore PyTorch models and weights
+*.pt
+*.pth
+*.ckpt
+
+# Ignore MLOps tracking, experiments and logs
+wandb/
+logs/
+tb_logs/
