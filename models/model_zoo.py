@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from torch import nn
 
-from dbt_sinogram_completion.conf.geometry import DBTGeometryConfig
-from dbt_sinogram_completion.models.Unet import SinogramUNet
-from dbt_sinogram_completion.models.interpolator import SinusoidalViewInterpolator
-from dbt_sinogram_completion.models.pipeline import SinogramCompletionPipeline
+from conf.geometry import DBTGeometryConfig
+from models.Unet import SinogramUNet
+from models.interpolator import SinusoidalViewInterpolator
+from models.pipeline import SinogramCompletionPipeline
 
 
 def build_models(device) -> dict[str, nn.Module]:

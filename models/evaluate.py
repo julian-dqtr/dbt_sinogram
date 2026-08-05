@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from dbt_sinogram_completion.conf.geometry import DBTGeometryConfig
+from conf.geometry import DBTGeometryConfig
 from geometry.DBT_Geometry import DBTGeometry
 
 
