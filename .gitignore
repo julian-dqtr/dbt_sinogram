@@ -3,6 +3,13 @@
 env/
 venv/
 
+# Ignore archive files
+*.zip
+*.tar.gz
+archive/
+geometry/archive/
+
+
 # Ignore Python cache and compilation files
 __pycache__/
 *.py[cod]
