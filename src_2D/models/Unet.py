@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from monai.networks.nets import DynUNet
 
 
-class SinogramUNet(torch.nn.Module):
-    """Learned refiner for limited-angle sinogram completion."""
+class SinogramUNet(nn.Module):
+    """2D U-Net using MONAI's DynUNet (Dynamic U-Net) architecture."""
 
-    def __init__(self, in_channels: int = 2, out_channels: int = 1) -> None:
+    def __init__(self, in_channels: int = 1, out_channels: int = 1) -> None:
         super().__init__()
         strides = [[1, 1], [2, 2], [2, 2], [2, 2]]
         self.network = DynUNet(
@@ -52,5 +53,3 @@ class SinogramUNet(torch.nn.Module):
     def _crop_to_shape(x: torch.Tensor, shape: torch.Size) -> torch.Tensor:
         h, w = shape
         return x[..., :h, :w]
-
-
