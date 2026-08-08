@@ -12,9 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from conf.geometry import DBTGeometryConfig
-from data.dataset import SinogramCompletionDataset
-from models.Unet import SinogramUNet
+from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+from src_2D.data.dataset_2d import SinogramCompletionDataset
+from src_2D.models.unet_2d import SinogramUNet
 
 def parse_args():
     parser = argparse.ArgumentParser()

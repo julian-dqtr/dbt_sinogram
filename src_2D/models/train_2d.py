@@ -14,10 +14,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src_2D.conf.geometry import DBTGeometryConfig
-from src_2D.data.dataset import SinogramCompletionDataset
-from src_2D.models.Unet import SinogramUNet
-from src_2D.models.evaluate import (
+from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+from src_2D.data.dataset_2d import SinogramCompletionDataset
+from src_2D.models.unet_2d import SinogramUNet
+from src_2D.models.evaluate_2d import (
     build_full_astra_geometries,
     plot_qualitative_example,
     reconstruct_volume_sirt,
@@ -33,8 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=0.007875808314275142)
     parser.add_argument("--filters", type=int, default=16)
     parser.add_argument("--optimizer", type=str, choices=("Adam", "AdamW"), default="Adam")
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("models_2D"))
-    parser.add_argument("--figures-dir", type=Path, default=Path("models_2D/visualisation"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=PROJECT_ROOT / "outputs/2d/checkpoints")
+    parser.add_argument("--figures-dir", type=Path, default=PROJECT_ROOT / "outputs/2d/visualisation")
     parser.add_argument("--reconstruct-iters", type=int, default=15)
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-project", type=str, default="dbt-sinogram-completion-2D")

@@ -20,15 +20,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from conf.geometry import DBTGeometryConfig
-from data.dataset import SinogramCompletionDataset
-from models.evaluate import (
+from src_3D.conf.geometry_conf_3d import DBTGeometryConfig
+from src_3D.data.dataset_3d import SinogramCompletionDataset
+from src_3D.models.evaluate_3d import (
     build_full_astra_geometries,
     plot_qualitative_example,
     reconstruct_volume_sirt,
 )
-from models.Unet import SinogramUNet
-from models.pipeline import UNet25DWrapper
+from src_3D.models.unet_3d import SinogramUNet
+from src_3D.models.pipeline_3d import UNet25DWrapper
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-samples", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("models"))
-    parser.add_argument("--figures-dir", type=Path, default=Path("models/visualisation"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=PROJECT_ROOT / "outputs/3d/checkpoints")
+    parser.add_argument("--figures-dir", type=Path, default=PROJECT_ROOT / "outputs/3d/visualisation")
     parser.add_argument("--reconstruct-iters", type=int, default=15)
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-project", type=str, default="dbt-sinogram-completion-3d")

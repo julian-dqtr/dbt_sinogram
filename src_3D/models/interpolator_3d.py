@@ -22,7 +22,7 @@ class SinusoidalViewInterpolator(nn.Module):
     ) -> None:
         super().__init__()
         if angles_rad is None:
-            from conf.geometry import DBTGeometryConfig
+            from src_3D.conf.geometry_conf_3d import DBTGeometryConfig
             angles_rad = DBTGeometryConfig().full_angles
         angles_rad = np.asarray(angles_rad, dtype=np.float64)
 
