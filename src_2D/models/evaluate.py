@@ -6,8 +6,8 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from conf.geometry import DBTGeometryConfig
-from geometry.DBT_Geometry import DBTGeometry
+from src_2D.conf.geometry import DBTGeometryConfig
+from src_2D.geometry.DBT_Geometry import DBTGeometry
 
 
 def build_full_astra_geometries(geometry_config: DBTGeometryConfig, image_shape: Tuple[int, int]):

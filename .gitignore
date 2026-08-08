@@ -37,8 +37,7 @@ __pycache__/
 *.h5
 *.hdf5
 *.zarr
-data/
-datasets/
+
 
 # Ignore PyTorch models and weights
 *.pt
@@ -49,3 +48,10 @@ datasets/
 wandb/
 logs/
 tb_logs/
+
+# Ignore personal notes and commands
+TODO.md
+commandes.md
+
+# Ignore database files (Optuna)
+*.db
