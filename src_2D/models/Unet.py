@@ -9,15 +9,18 @@ from monai.networks.nets import DynUNet
 class SinogramUNet(nn.Module):
     """2D U-Net using MONAI's DynUNet (Dynamic U-Net) architecture."""
 
-    def __init__(self, in_channels: int = 1, out_channels: int = 1) -> None:
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, filters: int = 16) -> None:
         super().__init__()
+        if filters <= 0:
+            raise ValueError("filters must be a positive integer")
+
         strides = [[1, 1], [2, 2], [2, 2], [2, 2]]
         self.network = DynUNet(
             spatial_dims=2,
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=[[3, 3], [3, 3], [3, 3], [3, 3]],
-            filters=[16, 32, 64, 128],
+            filters=[filters, filters * 2, filters * 4, filters * 8],
             strides=strides,
             upsample_kernel_size=[[2, 2], [2, 2], [2, 2]],
             norm_name="instance",

@@ -28,9 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-epochs", type=int, default=500)
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--min-delta", type=float, default=1e-5)
-    parser.add_argument("--n-samples", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--n-samples", type=int, default=300)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=0.007875808314275142)
+    parser.add_argument("--filters", type=int, default=16)
+    parser.add_argument("--optimizer", type=str, choices=("Adam", "AdamW"), default="Adam")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("models_2D"))
     parser.add_argument("--figures-dir", type=Path, default=Path("models_2D/visualisation"))
     parser.add_argument("--reconstruct-iters", type=int, default=15)
@@ -52,12 +54,16 @@ def main() -> None:
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     test_dataset = SinogramCompletionDataset(n_samples=max(1, args.n_samples // 5), phantom_type="mixed", device=str(device))
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     save_random_dataset_preview(train_dataset, geometry, args)
 
-    model = SinogramUNet(in_channels=1, out_channels=1).to(device)
+    model = SinogramUNet(in_channels=1, out_channels=1, filters=args.filters).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    if args.optimizer == "Adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     criterion = torch.nn.MSELoss()
 
     run = None
@@ -164,6 +170,46 @@ def main() -> None:
     if (args.checkpoint_dir / "best_model.pt").exists():
         model.load_state_dict(torch.load(args.checkpoint_dir / "best_model.pt", map_location=device, weights_only=True))
 
+    print("\nEvaluating best model on test set...")
+    model.eval()
+    test_loss = 0.0
+    test_psnr = 0.0
+    test_ssim = 0.0
+    with torch.no_grad():
+        for incomplete, target, _ in test_loader:
+            incomplete = incomplete.to(device)
+            target = target.to(device)
+            refined_output = model(incomplete)
+
+            test_loss += criterion(refined_output, target).item()
+
+            target_np = target.cpu().numpy()
+            output_np = refined_output.cpu().numpy()
+
+            batch_psnr = 0.0
+            batch_ssim = 0.0
+            for i in range(target_np.shape[0]):
+                t = target_np[i, 0]
+                o = output_np[i, 0]
+                batch_psnr += psnr(t, o, data_range=2.0)
+                batch_ssim += ssim(t, o, data_range=2.0)
+
+            test_psnr += batch_psnr / target_np.shape[0]
+            test_ssim += batch_ssim / target_np.shape[0]
+
+    test_loss /= max(1, len(test_loader))
+    test_psnr /= max(1, len(test_loader))
+    test_ssim /= max(1, len(test_loader))
+    print(f"Test Loss: {test_loss:.4f} | Test PSNR: {test_psnr:.4f} | Test SSIM: {test_ssim:.4f}")
+
+    if run is not None:
+        import wandb
+        wandb.log({
+            "metrics/test_loss": test_loss,
+            "metrics/test_psnr": test_psnr,
+            "metrics/test_ssim": test_ssim,
+        })
+
     save_training_curve(train_losses, args)
     generate_example_figure(model, test_dataset, device, geometry, args, run)
         
@@ -253,7 +299,7 @@ def save_random_dataset_preview(dataset, geometry, args) -> None:
         ax.set_ylabel("Detector width u (mm)")
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    axes[0].imshow(phantom.squeeze(0).numpy(), cmap="gray", origin="lower", extent=image_extent, vmin=-1.0, vmax=1.0)
+    axes[0].imshow(phantom.detach().cpu().squeeze(0).numpy(), cmap="gray", origin="lower", extent=image_extent, vmin=-1.0, vmax=1.0)
     axes[0].set_title(f"Random sample #{idx} (Ground truth phantom)")
     axes[0].set_xlabel("X (mm)")
     axes[0].set_ylabel("Z (mm)")

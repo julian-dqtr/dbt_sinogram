@@ -216,6 +216,12 @@ class SinogramCompletionDataset(Dataset):
         phantom = self.phantom_gen.make_phantom(self.image_shape, self.phantom_type)
         full_sinogram = self.projector_fn(phantom).to(self.device)
         full_sinogram = self._add_poisson_noise(full_sinogram)
+        
+        # Normalize sinogram to approximately [-1, 1]
+        sino_max = full_sinogram.abs().max()
+        if sino_max > 0:
+            full_sinogram = full_sinogram / sino_max
+            
         incomplete_sinogram = self._crop_to_acquired_views(full_sinogram)
 
         return (
