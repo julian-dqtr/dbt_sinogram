@@ -26,11 +26,20 @@ def parse_args():
     parser.add_argument("--n-trials", type=int, default=50)
     parser.add_argument("--n-epochs", type=int, default=15)
     parser.add_argument("--n-samples", type=int, default=50)
+    parser.add_argument("--n-jobs", type=int, default=8, help="Number of parallel trials (1 per GPU)")
     parser.add_argument("--use-wandb", action="store_true", help="Log trials to W&B")
     return parser.parse_args()
 
 def objective(trial, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --- Assign GPU based on trial number ---
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 0:
+        gpu_id = trial.number % num_gpus
+        device = torch.device(f"cuda:{gpu_id}")
+    else:
+        device = torch.device("cpu")
+        
+    print(f"[Trial {trial.number}] Using device {device}")
     
     # --- Hyperparameters Search Space ---
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
@@ -158,8 +167,20 @@ def objective(trial, args):
 
 def main():
     args = parse_args()
-    study = optuna.create_study(direction="maximize", study_name="snn_2d_optimization")
-    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials, show_progress_bar=True)
+    
+    # Use SQLite backend to allow multiple processes
+    storage_name = "sqlite:///optuna_snn_2d.db"
+    study_name = "snn_2d_optimization"
+    
+    study = optuna.create_study(
+        direction="maximize", 
+        study_name=study_name, 
+        storage=storage_name, 
+        load_if_exists=True
+    )
+    
+    print(f"Starting Optuna search with {args.n_jobs} parallel jobs...")
+    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials, n_jobs=args.n_jobs, show_progress_bar=(args.n_jobs==1))
     
     print("\n=== Best Trial ===")
     print(f"Value (SSIM): {study.best_trial.value:.4f}")
