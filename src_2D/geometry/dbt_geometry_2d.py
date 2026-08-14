@@ -1,5 +1,6 @@
-import numpy as np
 import astra
+import numpy as np
+
 
 class DBTGeometry:
     """Stationary-detector 2D fan-beam geometry for a single DBT slice acquisition.

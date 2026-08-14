@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple, Literal
+from typing import Callable, Literal, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 
 
 # ----------------------------------------------------------------------
@@ -24,7 +24,7 @@ def _random_ellipse_mask(shape: Tuple[int, int], n: int = 3) -> torch.Tensor:
         rx = np.random.uniform(0.1, 0.5)
         ry = np.random.uniform(0.1, 0.5)
         angle = np.random.uniform(0, 180)
-        intensity = np.random.uniform(-1.0, 1.0)
+        intensity = np.random.uniform(0.1, 1.0)
         yy, xx = torch.meshgrid(
             torch.linspace(-1.0, 1.0, H),
             torch.linspace(-1.0, 1.0, W),
@@ -36,7 +36,7 @@ def _random_ellipse_mask(shape: Tuple[int, int], n: int = 3) -> torch.Tensor:
         y_rot = -sin_a * (xx - cx) + cos_a * (yy - cy)
         inside = (x_rot / rx) ** 2 + (y_rot / ry) ** 2 <= 1.0
         mask[inside] += intensity
-    return torch.clamp(mask, -1.0, 1.0)
+    return torch.clamp(mask, 0.0, 1.0)
 
 
 def _random_blobs_mask(shape: Tuple[int, int], n_blobs: int = 5) -> torch.Tensor:
@@ -52,10 +52,10 @@ def _random_blobs_mask(shape: Tuple[int, int], n_blobs: int = 5) -> torch.Tensor
         cx = np.random.uniform(-0.8, 0.8)
         cy = np.random.uniform(-0.8, 0.8)
         sigma = np.random.uniform(0.05, 0.2)
-        intensity = np.random.uniform(-1.0, 1.0)
+        intensity = np.random.uniform(0.1, 1.0)
         blob = torch.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma**2))
         mask += intensity * blob
-    return torch.clamp(mask, -1.0, 1.0)
+    return torch.clamp(mask, 0.0, 1.0)
 
 
 def _random_rectangles_mask(shape: Tuple[int, int], n: int = 4) -> torch.Tensor:
@@ -68,7 +68,7 @@ def _random_rectangles_mask(shape: Tuple[int, int], n: int = 4) -> torch.Tensor:
         w = np.random.uniform(0.1, 0.6)
         h = np.random.uniform(0.1, 0.6)
         angle = np.random.uniform(0, 180)
-        intensity = np.random.uniform(-1.0, 1.0)
+        intensity = np.random.uniform(0.1, 1.0)
         yy, xx = torch.meshgrid(
             torch.linspace(-1.0, 1.0, H),
             torch.linspace(-1.0, 1.0, W),
@@ -80,7 +80,7 @@ def _random_rectangles_mask(shape: Tuple[int, int], n: int = 4) -> torch.Tensor:
         y_rot = -sin_a * (xx - cx) + cos_a * (yy - cy)
         inside = (x_rot.abs() <= w / 2) & (y_rot.abs() <= h / 2)
         mask[inside] += intensity
-    return torch.clamp(mask, -1.0, 1.0)
+    return torch.clamp(mask, 0.0, 1.0)
 
 
 def _shepp_logan_tensor(shape: Tuple[int, int]) -> torch.Tensor:
@@ -166,7 +166,7 @@ class PhantomGenerator:
             base = F.grid_sample(base, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
             base = base.squeeze(0).squeeze(0)
 
-        return torch.clamp(base, -1.0, 1.0)
+        return torch.clamp(base, 0.0, 1.0)
 
 
 # =============================================================================
@@ -185,6 +185,7 @@ class SinogramCompletionDataset(Dataset):
         projector_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         geometry_config: Optional[DBTGeometryConfig] = None,
         noise_level: float = 0.0,
+        is_validation_or_test: bool = False,
     ) -> None:
         self.geometry_config = geometry_config or DBTGeometryConfig()
         self.n_samples = n_samples
@@ -199,6 +200,7 @@ class SinogramCompletionDataset(Dataset):
         self.phantom_gen = PhantomGenerator(self.device)
         self.phantom_type = phantom_type
         self.noise_level = noise_level
+        self.is_validation_or_test = is_validation_or_test
 
     def _add_poisson_noise(self, sinogram: torch.Tensor) -> torch.Tensor:
         """Add Poisson noise to the sinogram. A placeholder for future implementation."""
@@ -213,14 +215,24 @@ class SinogramCompletionDataset(Dataset):
         return self.n_samples
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.is_validation_or_test:
+            np.random.seed(index)
+            torch.manual_seed(index)
+
         phantom = self.phantom_gen.make_phantom(self.image_shape, self.phantom_type)
+
+        if self.is_validation_or_test:
+            # Reset seeds so we don't break global randomness for other tasks
+            np.random.seed()
+            torch.seed()
+
         full_sinogram = self.projector_fn(phantom).to(self.device)
         full_sinogram = self._add_poisson_noise(full_sinogram)
         
-        # Normalize sinogram to approximately [-1, 1]
-        sino_max = full_sinogram.abs().max()
-        if sino_max > 0:
-            full_sinogram = full_sinogram / sino_max
+        # Global normalization to approximately [-1, 1] based on theoretical maximum
+        # For a 128x128 image with max density 1.0, max projection is ~128
+        global_sino_norm = 100.0 
+        full_sinogram = full_sinogram / global_sino_norm
             
         incomplete_sinogram = self._crop_to_acquired_views(full_sinogram)
 

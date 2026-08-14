@@ -1,109 +1,131 @@
-import numpy as np
+import sys
+from pathlib import Path
+
+# Add project root to sys.path if not present
+repo_root = Path(__file__).resolve().parent.parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 import astra
 import matplotlib.pyplot as plt
+import numpy as np
 
-from DBT_Geometry import DBTGeometry
+try:
+    from src_3D.conf.geometry_conf_3d import DBTGeometryConfig
+    from src_3D.geometry.dbt_geometry_3d import DBTGeometry
+except ImportError:
+    from conf.geometry_conf_3d import DBTGeometryConfig
+    from dbt_geometry_3d import DBTGeometry
 
-# Setup parameters
+# 1. Setup parameters from configuration
+cfg_geom = DBTGeometryConfig()
 
-num_views = 25
-angles = np.linspace(-25 * np.pi / 180, 25 * np.pi / 180, num_views)
-src_radius = 590.0
-det_radius = 60.0
-det_col_count = 128
-det_pixel_size = 2.5
+angles = cfg_geom.angles
+num_views = cfg_geom.num_views
+src_radius = cfg_geom.src_radius_mm
+det_radius = cfg_geom.det_radius_mm
+det_row_count = cfg_geom.det_row_count
+det_col_count = cfg_geom.det_col_count
+det_pixel_size = cfg_geom.det_pixel_size_mm
 
-# Build the same stationary-detector geometry used by the training pipeline.
+# Build 3D cone-beam stationary-detector geometry used by the pipeline
 dbt_geometry = DBTGeometry(
     angles=angles,
     src_radius=src_radius,
     det_radius=det_radius,
+    det_row_count=det_row_count,
     det_col_count=det_col_count,
     det_pixel_size=det_pixel_size,
 )
 proj_geom = dbt_geometry.get_astra_proj_geom()
-vol_geom = astra.create_vol_geom(32, 128, -120, 120, 0, 60)
 
-# 2 Create a single point
+depth, rows, cols = cfg_geom.image_shape
+(z_min, z_max), (y_min, y_max), (x_min, x_max) = cfg_geom.image_extent_mm
+vol_geom = astra.create_vol_geom(rows, cols, depth, x_min, x_max, y_min, y_max, z_min, z_max)
 
-# Empty image (ASTRA expects data in row, col order Z, X)
-vol_data = np.zeros((32, 128), dtype=np.float32)
+# 2. Create a single point in 3D volume
+# ASTRA 3D volume data is indexed as (depth/slices, rows/Y, cols/X)
+vol_data = np.zeros((depth, rows, cols), dtype=np.float32)
 
-# Let's place a point at physical coordinates: X = 40mm, Z = 30mm
-# Convert physical mm to pixel indices:
-# X ranges from -120 to 120 over 128 pixels. So 40mm is at index ~85
-# Z ranges from 0 to 60 over 32 pixels. So 30mm is at index 16
+# Place a point at physical coordinates: X = 20.0 mm, Y = 10.0 mm, Z = 30.0 mm
+px_target, py_target, pz_target = 20.0, 10.0, 30.0
+z_idx = int((pz_target - z_min) / (z_max - z_min) * depth)
+y_idx = int((py_target - y_min) / (y_max - y_min) * rows)
+x_idx = int((px_target - x_min) / (x_max - x_min) * cols)
 
-x_pt, z_pt = 40.3125, 30.9375
-x_idx, z_idx = 85, 16
+# Actual center of the voxel
+px = x_min + (x_idx + 0.5) * (x_max - x_min) / cols
+py = y_min + (y_idx + 0.5) * (y_max - y_min) / rows
+pz = z_min + (z_idx + 0.5) * (z_max - z_min) / depth
 
-# Place the point using Z, X indexing
-vol_data[z_idx, x_idx] = 1.0  # A single bright point
+vol_data[z_idx, y_idx, x_idx] = 1.0
 
-# 3 ASTRA forward projection
+# 3. ASTRA 3D forward projection
+projector_id = astra.create_projector('cuda3d', proj_geom, vol_geom)
+vol_id = astra.data3d.create('-vol', vol_geom, vol_data)
+sino_id = astra.data3d.create('-sino', proj_geom)
 
-projector_id = astra.create_projector('cuda', proj_geom, vol_geom)
-vol_id = astra.data2d.create('-vol', vol_geom, vol_data)
-sino_id = astra.data2d.create('-sino', proj_geom)
-
-cfg = astra.astra_dict('FP_CUDA')
+cfg = astra.astra_dict('FP3D_CUDA')
 cfg['ProjectorId'] = projector_id
 cfg['VolumeDataId'] = vol_id
 cfg['ProjectionDataId'] = sino_id
 alg_id = astra.algorithm.create(cfg)
 astra.algorithm.run(alg_id)
 
-sino_arr = astra.data2d.get(sino_id)
+sino_arr = astra.data3d.get(sino_id)  # Shape: (det_row_count, num_views, det_col_count)
+
 astra.algorithm.delete(alg_id)
+astra.data3d.delete(sino_id)
+astra.data3d.delete(vol_id)
+astra.projector.delete(projector_id)
 
-# 4 Maths Computation of Expected Detector Hits
-
-# We calculate exactly where the ray passing through (40, 30) should hit the detector at Z = -60
+# 4. Mathematical ray-tracing calculation of expected detector hits
 expected_u_pixels = []
+expected_v_pixels = []
 
 for theta in angles:
-    # 1. Source position
-    S_x = src_radius * np.sin(theta)
-    S_z = src_radius * np.cos(theta)
-    
-    # 2. Vector from Source to our Point P(40, 30)
-    V_x = x_pt - S_x
-    V_z = z_pt - S_z
-    
-    # 3. Find intersection with the detector plane (Z = -60)
-    # S_z + t * V_z = -det_radius  =>  t = (-det_radius - S_z) / V_z
-    t = (-det_radius - S_z) / V_z
-    
-    # 4. Calculate X coordinate on the detector
-    hit_x_mm = S_x + t * V_x
-    
-    # 5. Convert mm to detector pixel index (Detector width is 128*2.5 = 320mm, from -160 to +160)
-    hit_pixel = hit_x_mm / det_pixel_size + (det_col_count - 1) / 2.0
-    expected_u_pixels.append(hit_pixel)
+    Sx = src_radius * np.sin(theta)
+    Sy = src_radius * np.cos(theta)
+    Sz = 0.0
 
+    Vx = px - Sx
+    Vy = py - Sy
+    Vz = pz - Sz
 
+    # Intersection with stationary detector plane at Y = -det_radius:
+    t = (-det_radius - Sy) / Vy
+    hit_x = Sx + t * Vx
+    hit_z = Sz + t * Vz
 
-# 5 Visualization of Results
+    # Convert physical mm to detector pixel index (detector centered at 0)
+    hit_u = hit_x / det_pixel_size + (det_col_count - 1) / 2.0
+    hit_v = hit_z / det_pixel_size + (det_row_count - 1) / 2.0
 
+    expected_u_pixels.append(hit_u)
+    expected_v_pixels.append(hit_v)
 
-plt.figure(figsize=(12, 6))
+# 5. Visualization of results
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-# Plot ASTRA's 2D sinogram directly (shape: views x cols)
-plt.imshow(sino_arr.T, cmap='bone', origin='lower', aspect='auto')
+# Subplot 1: Detector U (columns) across views
+sino_u_proj = np.max(sino_arr, axis=0)  # (num_views, det_cols)
+axes[0].imshow(sino_u_proj.T, cmap='bone', origin='lower', aspect='auto')
+axes[0].plot(np.arange(num_views), expected_u_pixels, 'r--', linewidth=2, label='Math Ray-Tracing (U)')
+axes[0].set_title('ASTRA Simulation vs Math: Detector U (Col) vs View')
+axes[0].set_xlabel('View Index (Angle)')
+axes[0].set_ylabel('Detector Col Index (U)')
+axes[0].legend()
 
-# Overlay our mathematical calculation as a red dotted line
-plt.plot(np.arange(num_views), expected_u_pixels, 'r--', linewidth=2, label='Mathematical Ray-Tracing')
+# Subplot 2: Detector V (rows) across views
+sino_v_proj = np.max(sino_arr, axis=2)  # (det_rows, num_views)
+axes[1].imshow(sino_v_proj, cmap='bone', origin='lower', aspect='auto')
+axes[1].plot(np.arange(num_views), expected_v_pixels, 'r--', linewidth=2, label='Math Ray-Tracing (V)')
+axes[1].set_title('ASTRA Simulation vs Math: Detector V (Row) vs View')
+axes[1].set_xlabel('View Index (Angle)')
+axes[1].set_ylabel('Detector Row Index (V)')
+axes[1].legend()
 
-plt.title('ASTRA Simulation vs Math (Stationary Detector, 2D)')
-plt.xlabel('View Index (Angle)')
-plt.ylabel('Detector X Pixel Index')
-plt.legend()
 plt.tight_layout()
-
-plt.savefig('geometry_check_result.png', dpi=300)
-print("Plot saved successfully as geometry_check_result.png")
-
-# Cleanup
-astra.data2d.delete(sino_id)
-astra.data2d.delete(vol_id)
-astra.projector.delete(projector_id)
+output_path = Path(__file__).parent / 'geometry_check_3d_result.png'
+plt.savefig(output_path, dpi=300)
+print(f"Plot saved successfully as {output_path}")

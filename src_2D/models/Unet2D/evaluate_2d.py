@@ -106,7 +106,7 @@ def plot_qualitative_example(
     def plot_sinogram(ax, sinogram: torch.Tensor, title: str):
         # [views, cols] -> transpose to [cols, views] so columns map to the angle axis.
         image = sinogram.detach().cpu().numpy().T
-        ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent, vmin=0, vmax=sino_vmax)
+        ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent, vmax=sino_vmax)
         ax.set_xlim(angle_min, angle_max)
         ax.set_title(title)
         ax.set_xlabel(r"Angle $\phi$ (degrees)")
@@ -135,7 +135,7 @@ def plot_qualitative_example(
     if reconstructed_image is not None:
         vmax = float(phantom.max()) or 1.0
         axes[1, 2].imshow(
-            reconstructed_image, cmap="gray", origin="lower", vmin=0, vmax=vmax, extent=image_extent
+            reconstructed_image, cmap="gray", origin="lower", vmax=vmax, extent=image_extent
         )
         axes[1, 2].set_title("6. SIRT Reconstruction (from U-Net Sinogram)")
         axes[1, 2].set_xlabel("X (mm)")
@@ -149,4 +149,130 @@ def plot_qualitative_example(
     plt.savefig(save_path, dpi=120)
     plt.close(fig)
     return fig
+
+
+import random
+
+
+def resolve_compute_device() -> torch.device:
+    """Prefer CUDA, but fall back if the local PyTorch/cuDNN build cannot run there."""
+    if not torch.cuda.is_available():
+        print("CUDA is not available; using CPU.")
+        return torch.device("cpu")
+
+    cuda_device = torch.device("cuda")
+    probe = torch.randn(1, 1, 8, 8, device=cuda_device)
+    conv = torch.nn.Conv2d(1, 1, kernel_size=3).to(cuda_device)
+
+    try:
+        _ = conv(probe)
+        return cuda_device
+    except RuntimeError as exc:
+        if "CUDNN_STATUS_NOT_SUPPORTED_ARCH_MISMATCH" in str(exc):
+            print("CUDA is available but cuDNN does not support this GPU architecture; disabling cuDNN.")
+            torch.backends.cudnn.enabled = False
+            try:
+                _ = conv(probe)
+                print("Using CUDA with cuDNN disabled.")
+                return cuda_device
+            except RuntimeError as fallback_exc:
+                print(f"CUDA still failed after disabling cuDNN ({fallback_exc}); using CPU.")
+                torch.backends.cudnn.enabled = True
+                return torch.device("cpu")
+
+        print(f"CUDA probe failed ({exc}); using CPU.")
+        return torch.device("cpu")
+
+
+def generate_example_figure(model, dataset, device, geometry, args, run) -> None:
+    model.eval()
+    idx = random.randrange(len(dataset))
+    incomplete, full, phantom = dataset[idx]
+    with torch.no_grad():
+        refined_out = model(incomplete.unsqueeze(0).to(device))
+
+    reconstructed_image = None
+    try:
+        proj_geom, vol_geom = build_full_astra_geometries(geometry, tuple(phantom.shape[1:]))
+        reconstructed_image = reconstruct_volume_sirt(
+            refined_out.squeeze(0).squeeze(0).cpu().numpy() * 100.0, proj_geom, vol_geom, n_iterations=args.reconstruct_iters
+        )
+    except Exception as exc:
+        print(f"Skipping volume reconstruction panel ({exc}).")
+
+    save_path = args.figures_dir / "example_after_training.png"
+    # Create a dummy baseline to not break the plotting function
+    dummy_baseline = torch.zeros_like(incomplete.squeeze(0))
+    fig = plot_qualitative_example(
+        phantom.squeeze(0), full.squeeze(0), incomplete.squeeze(0), dummy_baseline, refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
+    )
+    print(f"Saved qualitative example to {save_path}")
+
+    if run is not None:
+        import wandb
+        wandb.log({"example": wandb.Image(fig)})
+
+
+def save_random_dataset_preview(dataset, geometry, args) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    idx = random.randrange(len(dataset))
+    incomplete, full, phantom = dataset[idx]
+
+    row_min, row_max = geometry.image_extent_mm[0]
+    col_min, col_max = geometry.image_extent_mm[1]
+    image_extent = [col_min, col_max, row_min, row_max]
+
+    detector_half_width = geometry.det_col_count * geometry.det_pixel_size_mm / 2.0
+    sino_extent = [geometry.full_angle_min_deg, geometry.full_angle_max_deg, -detector_half_width, detector_half_width]
+
+    def plot_sinogram(ax, sinogram: torch.Tensor, title: str) -> None:
+        image = sinogram.detach().cpu().squeeze(0).numpy().T
+        ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent)
+        ax.set_title(title)
+        ax.set_xlabel(r"Angle $\phi$ (degrees)")
+        ax.set_ylabel("Detector width u (mm)")
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    axes[0].imshow(phantom.detach().cpu().squeeze(0).numpy(), cmap="gray", origin="lower", extent=image_extent, vmin=-1.0, vmax=1.0)
+    axes[0].set_title(f"Random sample #{idx} (Ground truth phantom)")
+    axes[0].set_xlabel("X (mm)")
+    axes[0].set_ylabel("Z (mm)")
+
+    plot_sinogram(axes[1], full, "Full sinogram (180 views)")
+    plot_sinogram(axes[2], incomplete, "Incomplete sinogram (Limited views)")
+
+    plt.tight_layout()
+    save_path = args.figures_dir / "dataset_preview.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"Saved random dataset preview to {save_path}")
+
+
+def save_training_curve(train_losses: list[float], args) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not train_losses:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    epochs = range(1, len(train_losses) + 1)
+    ax.plot(epochs, train_losses, label="U-Net loss", linewidth=2)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("MSE loss")
+    ax.set_title("Training loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    save_path = args.figures_dir / "training_losses.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120)
+    plt.close(fig)
+
 

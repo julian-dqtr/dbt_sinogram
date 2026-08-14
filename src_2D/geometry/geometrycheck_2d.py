@@ -1,8 +1,19 @@
-import numpy as np
+import sys
+from pathlib import Path
+
+# Add project root to sys.path if not present
+repo_root = Path(__file__).resolve().parent.parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 import astra
 import matplotlib.pyplot as plt
+import numpy as np
 
-from DBT_Geometry import DBTGeometry
+try:
+    from src_2D.geometry.dbt_geometry_2d import DBTGeometry
+except ImportError:
+    from dbt_geometry_2d import DBTGeometry
 
 # Setup parameters
 
