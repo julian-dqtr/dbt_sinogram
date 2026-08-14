@@ -11,7 +11,7 @@ def build_sinogram_graph_topology(geom, grid_res=20, object_radius=50.0):
     num_views = geom.num_views
     num_det = geom.det_col_count
     num_nodes = num_views * num_det
-    
+
     edges = []
     
     # 1. Local horizontal edges (same view, adjacent detectors)
