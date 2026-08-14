@@ -91,21 +91,28 @@ def build_so2_restriction_maps(edge_index, geom):
     
     return edge_attr
 
+_cached_edge_index = None
+_cached_edge_attr = None
+
 def create_sinogram_data(sinogram_tensor, geom, grid_res=20, object_radius=50.0):
     """
     Converts a standard 2D sinogram tensor [num_views, num_detectors]
     into a PyTorch Geometric Data object with SO(2) restriction maps.
+    The graph topology is cached after the first computation.
     """
+    global _cached_edge_index, _cached_edge_attr
+    
     assert sinogram_tensor.shape == (geom.num_views, geom.det_col_count), "Sinogram shape mismatch"
     
     # Flatten sinogram to create node features [num_nodes, 1]
     x = sinogram_tensor.view(-1, 1).float()
     
-    # Build graph topology
-    edge_index = build_sinogram_graph_topology(geom, grid_res, object_radius)
-    
-    # Build restriction maps
-    edge_attr = build_so2_restriction_maps(edge_index, geom)
-    
-    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    if _cached_edge_index is None or _cached_edge_attr is None:
+        # Build graph topology
+        _cached_edge_index = build_sinogram_graph_topology(geom, grid_res, object_radius)
+        
+        # Build restriction maps
+        _cached_edge_attr = build_so2_restriction_maps(_cached_edge_index, geom)
+        
+    data = Data(x=x, edge_index=_cached_edge_index, edge_attr=_cached_edge_attr)
     return data
