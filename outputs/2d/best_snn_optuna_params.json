@@ -1,0 +1,11 @@
+{
+    "best_value_ssim": 0.13208456418316383,
+    "params": {
+        "lr": 0.0009264299300172515,
+        "num_stalks": 32,
+        "num_layers": 6,
+        "lambda_m0": 0.46322750909841937,
+        "lambda_m1": 0.4013857969396701,
+        "anneal_epochs": 16
+    }
+}
