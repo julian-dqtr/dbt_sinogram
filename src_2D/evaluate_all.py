@@ -30,7 +30,19 @@ def load_model(model_name: str, device: torch.device):
     elif model_name == "UNet2D":
         from src_2D.models.Unet2D.unet_2d import SinogramUNet
         model = SinogramUNet(in_channels=1, out_channels=1, filters=32).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints/best_model.pt", map_location=device))
+        model.load_state_dict(torch.load("outputs/2d/checkpoints/best_model.pt", map_location=device, weights_only=True))
+        return model
+    elif model_name == "UNet2dRNO":
+        from src_2D.models.Unet2dRNO.unet_rno import RadonInformedUNet
+        from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+        geometry = DBTGeometryConfig()
+        model = RadonInformedUNet(geometry_config=geometry, in_channels=1, out_channels=1, filters=32).to(device)
+        model.load_state_dict(torch.load("outputs/2d/checkpoints_rno/best_model.pt", map_location=device, weights_only=True))
+        return model
+    elif model_name == "UNet2dHLCC":
+        from src_2D.models.Unet2dHLCC.unet_hlcc import Unet2dHLCC
+        model = Unet2dHLCC(in_channels=1, out_channels=1, filters=32).to(device)
+        model.load_state_dict(torch.load("outputs/2d/checkpoints_unet2dhlcc/best_unet2dhlcc_model.pt", map_location=device, weights_only=True))
         return model
     else:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -43,6 +55,14 @@ def evaluate_models(models: dict, dataset, device, num_samples: int = 10):
     # We evaluate on a fixed subset to ensure fair comparison
     num_samples = min(num_samples, len(dataset))
     
+    from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+    config = DBTGeometryConfig()
+    num_views = config.full_angles.shape[0]
+    in_window = (np.rad2deg(config.full_angles) >= config.angle_min_deg) & (np.rad2deg(config.full_angles) <= config.angle_max_deg)
+    acquired_mask_1d = torch.zeros(num_views, device=device)
+    acquired_mask_1d[in_window] = 1.0
+    acquired_mask = acquired_mask_1d.view(1, 1, num_views, 1)
+
     for i in range(num_samples):
         incomplete, full, phantom = dataset[i]
         incomplete_batch = incomplete.unsqueeze(0).to(device)
@@ -51,7 +71,10 @@ def evaluate_models(models: dict, dataset, device, num_samples: int = 10):
         for model_name, model in models.items():
             model.eval()
             with torch.no_grad():
-                refined_out = model(incomplete_batch)
+                if model_name == "UNet2dHLCC":
+                    refined_out = model(incomplete_batch, acquired_mask)
+                else:
+                    refined_out = model(incomplete_batch)
             
             refined_np = refined_out.squeeze(0).squeeze(0).cpu().numpy()
             
@@ -98,6 +121,8 @@ def main():
         "LinearInterpolation",
         "SinusoidalInterpolation",
         "UNet2D",
+        "UNet2dRNO",
+        "UNet2dHLCC",
         # "GLM",
         # "LPD",
         # "SNN"

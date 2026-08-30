@@ -57,3 +57,4 @@ notes.md
 
 # Ignore database files (Optuna)
 *.db
+*.log

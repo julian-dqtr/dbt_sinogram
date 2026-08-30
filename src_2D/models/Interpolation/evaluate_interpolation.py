@@ -14,7 +14,7 @@ from src_2D.models.Interpolation.interpolator_2d import (
     LinearViewInterpolator, SinusoidalViewInterpolator)
 from src_2D.models.Unet2D.evaluate_2d import (build_full_astra_geometries,
                                               plot_qualitative_example,
-                                              reconstruct_volume_sirt,
+                                              reconstruct_volume_fbp,
                                               resolve_compute_device)
 
 
@@ -42,12 +42,12 @@ def evaluate_interpolator(interpolator, dataset, device, geometry, args, name="i
     print(f"PSNR: {val_psnr:.2f} dB")
     print(f"SSIM: {val_ssim:.4f}")
     
-    # Reconstruct SIRT
+    # Reconstruct FBP
     reconstructed_image = None
     try:
         proj_geom, vol_geom = build_full_astra_geometries(geometry, tuple(phantom.shape[1:]))
-        reconstructed_image = reconstruct_volume_sirt(
-            refined_np * 100.0, proj_geom, vol_geom, n_iterations=args.reconstruct_iters
+        reconstructed_image = reconstruct_volume_fbp(
+            refined_np * 100.0, proj_geom, vol_geom
         )
     except Exception as exc:
         print(f"Skipping volume reconstruction panel ({exc}).")

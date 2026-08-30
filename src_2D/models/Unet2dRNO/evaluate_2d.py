@@ -75,18 +75,6 @@ def plot_qualitative_example(
     geometry_config: DBTGeometryConfig,
     save_path: Path,
 ):
-    """Save (and return) a figure comparing the GT phantom, sinograms, and the U-Net output.
-
-    Layout and style follow ``geometry/archive/smallgeometryV2.py``: physical units on the
-    axes (mm for the image, degrees for sinogram views, mm for detector width), numbered
-    panel titles, and the same x-axis range enforced across all sinogram panels for a direct
-    visual comparison.
-
-    Panels: (1) GT phantom, (2) full sinogram (-90..+90deg), (3) limited/incomplete
-    sinogram (the acquired +/-angle window, black elsewhere), (4) baseline (linear
-    interpolation) reconstruction, (5) U-Net reconstruction, and (6, if ASTRA is available)
-    the image reconstructed via FBP from the U-Net's sinogram.
-    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -103,7 +91,6 @@ def plot_qualitative_example(
     sino_extent = [angle_min, angle_max, -detector_half_width, detector_half_width]
 
     def plot_sinogram(ax, sinogram: torch.Tensor, title: str):
-        # [views, cols] -> transpose to [cols, views] so columns map to the angle axis.
         image = sinogram.detach().cpu().numpy().T
         ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent, vmax=sino_vmax)
         ax.set_xlim(angle_min, angle_max)
@@ -129,14 +116,14 @@ def plot_qualitative_example(
 
     plot_sinogram(axes[1, 0], baseline_sinogram, "4. Baseline Reconstruction (Sinusoidal Fit)")
 
-    plot_sinogram(axes[1, 1], refined_sinogram, "5. U-Net Reconstruction")
+    plot_sinogram(axes[1, 1], refined_sinogram, "5. RNO Reconstruction")
 
     if reconstructed_image is not None:
         vmax = float(phantom.max()) or 1.0
         axes[1, 2].imshow(
             reconstructed_image, cmap="gray", origin="lower", vmax=vmax, extent=image_extent
         )
-        axes[1, 2].set_title("6. FBP Reconstruction (from U-Net Sinogram)")
+        axes[1, 2].set_title("6. FBP Reconstruction (from RNO Sinogram)")
         axes[1, 2].set_xlabel("X (mm)")
         axes[1, 2].set_ylabel("Z (mm)")
     else:
@@ -154,7 +141,6 @@ import random
 
 
 def resolve_compute_device() -> torch.device:
-    """Prefer CUDA, but fall back if the local PyTorch/cuDNN build cannot run there."""
     if not torch.cuda.is_available():
         print("CUDA is not available; using CPU.")
         return torch.device("cpu")
@@ -200,7 +186,6 @@ def generate_example_figure(model, dataset, device, geometry, args, run) -> None
         print(f"Skipping volume reconstruction panel ({exc}).")
 
     save_path = args.figures_dir / "example_after_training.png"
-    # Create a dummy baseline to not break the plotting function
     dummy_baseline = torch.zeros_like(incomplete.squeeze(0))
     fig = plot_qualitative_example(
         phantom.squeeze(0), full.squeeze(0), incomplete.squeeze(0), dummy_baseline, refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
@@ -261,7 +246,7 @@ def save_training_curve(train_losses: list[float], args) -> None:
 
     fig, ax = plt.subplots(figsize=(10, 5))
     epochs = range(1, len(train_losses) + 1)
-    ax.plot(epochs, train_losses, label="U-Net loss", linewidth=2)
+    ax.plot(epochs, train_losses, label="Unet2dRNO loss", linewidth=2)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("MSE loss")
     ax.set_title("Training loss")
@@ -273,5 +258,3 @@ def save_training_curve(train_losses: list[float], args) -> None:
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     plt.close(fig)
-
-

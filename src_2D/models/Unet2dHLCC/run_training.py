@@ -12,6 +12,8 @@ from torch.utils.data.distributed import DistributedSampler
 import wandb
 from tqdm import tqdm
 
+torch.backends.cudnn.enabled = False
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -19,9 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.data.dataset_2d import SinogramCompletionDataset
-from src_2D.models.SinoSheavesNN.snn_model import SinoSheafNet
+from src_2D.models.Unet2dHLCC.unet_hlcc import Unet2dHLCC
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
-from src_2D.models.SinoSheavesNN.graph_data import create_sinogram_data
 
 def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, local_rank, is_distributed):
     model.train()
@@ -34,24 +35,36 @@ def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, loca
     if local_rank == 0:
         batch_iter = tqdm(dataloader, desc=f"Epoch {epoch}", leave=False)
         
+    # Precompute acquired_mask for Data Consistency
+    # We create it once on the correct device and reuse it for all batches.
+    import numpy as np
+    full_angles_deg = np.rad2deg(geom.angles)
+    config = DBTGeometryConfig() # We can instantiate it locally or pass it
+    in_window = (full_angles_deg >= config.angle_min_deg) & (full_angles_deg <= config.angle_max_deg)
+    acquired_mask_1d = torch.zeros(geom.num_views, device=device)
+    acquired_mask_1d[in_window] = 1.0
+    # Reshape to broadcast correctly against [B, C, Views, Detectors]
+    acquired_mask = acquired_mask_1d.view(1, 1, geom.num_views, 1)
+
     for batch_idx, (incomplete_sino, full_sino, _) in enumerate(batch_iter):
-        inc_sino = incomplete_sino[0, 0].to(device)
-        target_sino = full_sino[0, 0].to(device)
+        # We assume batch_size=1 for the physics loss to work correctly
+        # incomplete_sino is [B, C, Views, Detectors]
+        inc_sino = incomplete_sino.to(device)
         
-        # 1. Graph Construction
-        graph_data = create_sinogram_data(inc_sino, geom).to(device)
+        # Target for MSE
+        target_sino = full_sino[0, 0].to(device) # shape [Views, Detectors]
         
-        # 2. Forward Pass
+        # 1. Forward Pass with Data Consistency Layer
         optimizer.zero_grad()
-        out = model(graph_data)
+        out = model(inc_sino, acquired_mask) # shape [B, C, Views, Detectors]
         
-        # Reshape output from [num_nodes, 1] back to [num_views, num_detectors]
-        pred_sino = out.view(geom.num_views, geom.det_col_count)
+        # Reshape output to match target and physics loss
+        pred_sino = out[0, 0] # shape [Views, Detectors]
         
-        # 3. Physics-Informed Annealed Loss
+        # 2. Physics-Informed Annealed Loss
         loss, data_loss, m0_loss, m1_loss = loss_fn(pred_sino, target_sino, epoch)
         
-        # 4. Backward & Optimize
+        # 3. Backward & Optimize
         loss.backward()
         optimizer.step()
         
@@ -76,20 +89,24 @@ def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, loca
     return avg_loss, avg_data_loss, avg_m0_loss, avg_m1_loss
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SinoSheavesNN")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser = argparse.ArgumentParser(description="Train Unet2dHLCC")
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=0.00010616520112201657)
-    parser.add_argument("--n_samples", type=int, default=100)
-    parser.add_argument("--num_stalks", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=6)
-    parser.add_argument("--lambda_m0", type=float, default=0.009346058331947786)
-    parser.add_argument("--lambda_m1", type=float, default=0.016022295869809182)
-    parser.add_argument("--anneal_epochs", type=int, default=7)
-    parser.add_argument("--wandb_project", type=str, default="SinoSheavesNN")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--n_samples", type=int, default=5000)
+    parser.add_argument("--filters", type=int, default=32, help="Number of filters for U-Net")
+    parser.add_argument("--lambda_m0", type=float, default=1e-7)
+    parser.add_argument("--lambda_m1", type=float, default=1e-7)
+    parser.add_argument("--anneal_epochs", type=int, default=100)
+    parser.add_argument("--wandb_project", type=str, default="Unet2dHLCC")
     parser.add_argument("--use-wandb", action="store_true", help="Log metrics to W&B")
-    parser.add_argument("--checkpoint_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "checkpoints")
+    parser.add_argument("--checkpoint_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "checkpoints_unet2dhlcc")
     args = parser.parse_args()
+
+    # Note: we force batch_size to 1 because physics_loss currently supports batch_size=1
+    if args.batch_size != 1:
+        print("Warning: forcing batch_size to 1 because HelgasonLudwigLoss currently requires it.")
+        args.batch_size = 1
 
     # Setup DDP
     is_distributed = "LOCAL_RANK" in os.environ
@@ -127,7 +144,7 @@ def main():
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=(sampler is None), sampler=sampler)
     
     # Model & Loss
-    model = SinoSheafNet(num_stalks=args.num_stalks, num_layers=args.num_layers).to(device)
+    model = Unet2dHLCC(in_channels=1, out_channels=1, filters=args.filters).to(device)
     
     if is_distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -162,11 +179,27 @@ def main():
             if loss < best_loss:
                 best_loss = loss
                 model_to_save = model.module if is_distributed else model
-                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_snn_model.pt")
+                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_unet2dhlcc_model.pt")
                 print(f"  --> Saved new best model with loss: {best_loss:.4f}")
         
     if local_rank == 0:
-        print("Training completed.")
+        print("Training completed. Generating visualizations...")
+        
+        # We need to collect training losses during the loop if we want to plot them.
+        # But since we didn't store them in a list globally, we'll just generate the example figure.
+        try:
+            from src_2D.models.Unet2dHLCC.evaluate_2d import generate_example_figure
+            args.figures_dir = PROJECT_ROOT / "outputs" / "2d" / "figures_unet2dhlcc"
+            
+            # Use the latest model weights for evaluation
+            if is_distributed:
+                model.module.eval()
+                generate_example_figure(model.module, dataset, device, geom, args, wandb.run if wandb.run is not None else None)
+            else:
+                model.eval()
+                generate_example_figure(model, dataset, device, geom, args, wandb.run if wandb.run is not None else None)
+        except ImportError as e:
+            print(f"Warning: could not import or generate visualisations: {e}")
         
     if is_distributed:
         dist.destroy_process_group()

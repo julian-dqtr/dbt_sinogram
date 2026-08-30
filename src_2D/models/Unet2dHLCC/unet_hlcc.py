@@ -5,9 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from monai.networks.nets import DynUNet
 
-
-class SinogramUNet(nn.Module):
-    """2D U-Net using MONAI's DynUNet (Dynamic U-Net) architecture."""
+class Unet2dHLCC(nn.Module):
+    """
+    Classic 2D U-Net operating on the sinogram domain, 
+    intended to be trained with Helgason-Ludwig Consistency Conditions (HLCC).
+    """
 
     def __init__(self, in_channels: int = 1, out_channels: int = 1, filters: int = 16) -> None:
         super().__init__()
@@ -26,22 +28,31 @@ class SinogramUNet(nn.Module):
             norm_name="instance",
             deep_supervision=False,
         )
+        
         # DynUNet downsamples spatially by the product of strides along each axis
-        # (here 2*2*2=8 for H/W). The input must be a multiple of this factor so
-        # that encoder/decoder feature maps line up at the skip connections.
+        # The input must be padded to a multiple of this factor.
         self._divisor = [1, 1]
         for stride in strides:
             for axis, s in enumerate(stride):
                 self._divisor[axis] *= s
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, acquired_mask: torch.Tensor) -> torch.Tensor:
         if x.dim() != 4:
-            raise ValueError("Expected input shape [B, C, H, W]")
+            raise ValueError(f"Expected input shape [B, C, Angles, Detectors], got {x.shape}")
 
         original_shape = x.shape[-2:]
-        x = self._pad_to_divisor(x)
-        out = self.network(x)
-        return self._crop_to_shape(out, original_shape)
+        padded_x = self._pad_to_divisor(x)
+        out = self.network(padded_x)
+        pred_full = self._crop_to_shape(out, original_shape)
+        
+        # Residual learning: the network predicts the missing data 
+        # and smooths the transitions. We simply add the prediction to the input.
+        # Since x is 0 in the missing region, pred_full provides the missing data.
+        # The network can also learn to predict small negative values inside the
+        # acquired region to smooth out noise, avoiding sharp "walls".
+        out_sino = x + pred_full
+        
+        return out_sino
 
     def _pad_to_divisor(self, x: torch.Tensor) -> torch.Tensor:
         h, w = x.shape[-2:]
@@ -49,6 +60,7 @@ class SinogramUNet(nn.Module):
         pad_w = (-w) % self._divisor[1]
         if pad_h or pad_w:
             # F.pad takes padding from the last dimension backwards: (W, H).
+            # Using 'replicate' instead of default zeros to prevent boundary artifacts (checkerboard)
             x = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
         return x
 
