@@ -73,3 +73,49 @@ class SinusoidalViewInterpolator(nn.Module):
                     out[b, c, :, w] = design @ coeffs
 
         return torch.from_numpy(out).to(device=incomplete_sinogram.device, dtype=incomplete_sinogram.dtype)
+
+
+class LinearViewInterpolator(nn.Module):
+    """Baseline model that fills missing views by linear interpolation along the angle axis."""
+
+    def __init__(
+        self,
+        angles_rad: Optional[np.ndarray] = None,
+        fill_value: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if angles_rad is None:
+            from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+
+            angles_rad = DBTGeometryConfig().full_angles
+        self.angles_rad = np.asarray(angles_rad, dtype=np.float64)
+        self.fill_value = fill_value
+
+    def forward(self, incomplete_sinogram: torch.Tensor) -> torch.Tensor:
+        if incomplete_sinogram.dim() != 4:
+            raise ValueError("Expected a tensor of shape [B, C, views, detector_pixels]")
+        if incomplete_sinogram.shape[2] != len(self.angles_rad):
+            raise ValueError(
+                f"Expected {len(self.angles_rad)} views (one per configured angle), "
+                f"got {incomplete_sinogram.shape[2]}"
+            )
+
+        arr = incomplete_sinogram.detach().cpu().numpy()
+        out = np.zeros_like(arr, dtype=np.float32)
+
+        for b in range(arr.shape[0]):
+            for c in range(arr.shape[1]):
+                for w in range(arr.shape[3]):
+                    values = arr[b, c, :, w]
+                    valid = values != 0.0
+                    
+                    if not valid.any():
+                        out[b, c, :, w] = self.fill_value
+                        continue
+                        
+                    x_valid = self.angles_rad[valid]
+                    y_valid = values[valid]
+                    
+                    out[b, c, :, w] = np.interp(self.angles_rad, x_valid, y_valid)
+
+        return torch.from_numpy(out).to(device=incomplete_sinogram.device, dtype=incomplete_sinogram.dtype)

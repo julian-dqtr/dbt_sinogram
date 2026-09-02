@@ -1,20 +1,21 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import optuna
 import torch
-from torch.utils.data import DataLoader
 from skimage.metrics import structural_similarity as ssim
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.data.dataset_2d import SinogramCompletionDataset
-from src_2D.models.unet_2d import SinogramUNet
+from src_2D.models.Unet2D.unet_2d import SinogramUNet
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -40,7 +41,7 @@ def objective(trial, args):
     # --- Hyperparameters Search Space ---
     lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     filters_base = trial.suggest_categorical("filters", [16, 32])
-    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "AdamW"])
+    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "AdamW", "SGD", "RMSprop"])
     batch_size = trial.suggest_categorical("batch_size", [2, 4, 8])
 
     run = None
@@ -55,9 +56,9 @@ def objective(trial, args):
         )
 
     # --- Dataset ---
-    train_dataset = SinogramCompletionDataset(n_samples=args.n_samples, phantom_type="ellipses", device=str(device))
+    train_dataset = SinogramCompletionDataset(n_samples=args.n_samples, phantom_type="mixed", device=str(device))
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataset = SinogramCompletionDataset(n_samples=max(1, args.n_samples // 5), phantom_type="shepp_logan", device=str(device))
+    val_dataset = SinogramCompletionDataset(n_samples=max(1, args.n_samples // 5), phantom_type="mixed", device=str(device), is_validation_or_test=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # --- Model ---
@@ -67,8 +68,12 @@ def objective(trial, args):
     
     if optimizer_name == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    else:
+    elif optimizer_name == "AdamW":
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    elif optimizer_name == "SGD":
+        optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True)
+    elif optimizer_name == "RMSprop":
+        optimizer = torch.optim.RMSprop(model.parameters(), lr=lr)
         
     criterion = torch.nn.MSELoss()
 
@@ -106,7 +111,7 @@ def objective(trial, args):
                 output_np = output.cpu().numpy()
                 batch_ssim = 0.0
                 for i in range(target_np.shape[0]):
-                    batch_ssim += ssim(target_np[i, 0], output_np[i, 0], data_range=2.0)
+                    batch_ssim += ssim(target_np[i, 0], output_np[i, 0], data_range=1.0)
                 val_ssim += batch_ssim / target_np.shape[0]
                 
         val_ssim /= max(1, len(val_loader))
@@ -145,6 +150,15 @@ def main():
     print("Params:")
     for key, value in study.best_trial.params.items():
         print(f"    {key}: {value}")
+        
+    best_params_path = PROJECT_ROOT / "outputs" / "2d" / "best_optuna_params.json"
+    best_params_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(best_params_path, "w") as f:
+        json.dump({
+            "best_value_ssim": study.best_trial.value,
+            "params": study.best_trial.params
+        }, f, indent=4)
+    print(f"\n[+] Saved best parameters to {best_params_path}")
 
 if __name__ == "__main__":
     main()

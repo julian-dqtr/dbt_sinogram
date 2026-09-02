@@ -1,0 +1,9 @@
+{
+    "best_value_ssim": 0.5920786690937092,
+    "params": {
+        "lr": 0.007044483198553156,
+        "filters": 32,
+        "optimizer": "RMSprop",
+        "batch_size": 2
+    }
+}

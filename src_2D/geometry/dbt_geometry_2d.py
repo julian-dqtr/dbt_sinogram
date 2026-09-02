@@ -1,9 +1,10 @@
-import numpy as np
 import astra
+import numpy as np
+
 
 class DBTGeometry:
     """Stationary-detector 2D fan-beam geometry for a single DBT slice acquisition.
-
+    
     This models the same rotation plane as the original 3D cone-beam geometry (the axis
     perpendicular to this plane was stationary/decoupled anyway, so a single 2D slice
     reconstruction is physically equivalent to one row of the 3D volume).

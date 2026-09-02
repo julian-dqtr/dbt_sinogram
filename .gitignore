@@ -52,6 +52,9 @@ tb_logs/
 # Ignore personal notes and commands
 TODO.md
 commandes.md
+notes.md
+**/notes.md
 
 # Ignore database files (Optuna)
 *.db
+*.log
