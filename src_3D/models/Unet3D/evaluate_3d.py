@@ -75,7 +75,6 @@ def plot_qualitative_example(
     phantom: torch.Tensor,
     full_sinogram: torch.Tensor,
     incomplete_sinogram: torch.Tensor,
-    baseline_sinogram: torch.Tensor,
     refined_sinogram: torch.Tensor,
     reconstructed_image: Optional[np.ndarray],
     geometry_config: DBTGeometryConfig,
@@ -133,21 +132,19 @@ def plot_qualitative_example(
         f"{geometry_config.angle_min_deg:.0f} deg to {geometry_config.angle_max_deg:.0f} deg)",
     )
 
-    plot_sinogram(axes[1, 0], baseline_sinogram, "4. Baseline Reconstruction (Sinusoidal Fit)")
-
-    plot_sinogram(axes[1, 1], refined_sinogram, "5. U-Net Reconstruction")
+    plot_sinogram(axes[1, 0], refined_sinogram, "4. U-Net Reconstruction")
 
     if reconstructed_image is not None:
         vmax = max(float(phantom.max()), 1.0)
-        axes[1, 2].imshow(
+        axes[1, 1].imshow(
             reconstructed_image, cmap="gray", origin="lower", vmax=vmax, extent=image_extent
         )
-        axes[1, 2].set_title("6. SIRT Reconstruction Slice")
-        axes[1, 2].set_xlabel("X (mm)")
-        axes[1, 2].set_ylabel("Y (mm)")
+        axes[1, 1].set_title("6. SIRT Reconstruction Slice")
+        axes[1, 1].set_xlabel("X (mm)")
+        axes[1, 1].set_ylabel("Y (mm)")
     else:
-        axes[1, 2].axis("off")
-        axes[1, 2].set_title("6. SIRT Reconstruction unavailable (ASTRA not found)")
+        axes[1, 1].axis("off")
+        axes[1, 1].set_title("6. SIRT Reconstruction unavailable (ASTRA not found)")
 
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)

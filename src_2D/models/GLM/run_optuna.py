@@ -22,9 +22,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.data.dataset_2d import SinogramCompletionDataset
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
-from src_2D.models.SinoSheavesNN.graph_data import create_sinogram_data
+from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
-from src_2D.models.SinoSheavesNN.snn_model import SinoSheafNet
+from src_2D.models.GLM.glm_model import GLMNet
 from src_2D.utils.evaluation import get_soft_acquired_mask
 
 
@@ -41,7 +41,7 @@ def calibrate_loss(loss_fn, dataloader, geom, device, n_batches=5):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Optuna hyperparameter search for SinoSheavesNN")
+    parser = argparse.ArgumentParser(description="Optuna hyperparameter search for GLM Baseline")
     parser.add_argument("--n-trials", type=int, default=50, help="Number of trials for this worker")
     parser.add_argument("--n-epochs", type=int, default=15, help="Number of epochs per trial")
     parser.add_argument("--n-samples", type=int, default=100, help="Number of training samples")
@@ -52,13 +52,13 @@ def parse_args():
     parser.add_argument(
         "--storage",
         type=str,
-        default=f"sqlite:///{PROJECT_ROOT / 'db' / 'optuna_snn_2d.db'}",
+        default=f"sqlite:///{PROJECT_ROOT / 'db' / 'optuna_glm_2d.db'}",
         help="Optuna storage URL for distributed optimization",
     )
     parser.add_argument(
         "--study-name",
         type=str,
-        default="snn_2d_optimization",
+        default="glm_2d_optimization",
         help="Name of the study",
     )
     return parser.parse_args()
@@ -81,10 +81,10 @@ def objective(trial, args):
 
     # --- Hyperparameters Search Space ---
     lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    num_stalks = trial.suggest_categorical("num_stalks", [16, 32, 64, 128])
+    num_channels = trial.suggest_categorical("num_channels", [16, 24, 32, 64])
     num_layers = trial.suggest_categorical("num_layers", [2, 3, 4, 6])
-    k = trial.suggest_categorical("k", [3, 5, 8, 12])
-    sigma_deg = trial.suggest_categorical("sigma_deg", [5.0, 10.0, 15.0, 20.0])
+    kernel_size = trial.suggest_categorical("kernel_size", [3, 5, 7, 9])
+    
     lambda_m0 = trial.suggest_float("lambda_m0", 1e-3, 0.5, log=True)
     lambda_m1 = trial.suggest_float("lambda_m1", 1e-3, 0.5, log=True)
     anneal_epochs = trial.suggest_int("anneal_epochs", 3, max(4, args.n_epochs // 2))
@@ -97,14 +97,13 @@ def objective(trial, args):
 
         run = wandb.init(
             project="dbt-sinogram-optuna-2d",
-            group="SinoSheavesNN_" + args.study_name,
+            group="GLM_" + args.study_name,
             name=f"trial_{trial.number}_gpu{device.index if device.type == 'cuda' else 'cpu'}",
             config={
                 "lr": lr,
-                "num_stalks": num_stalks,
+                "num_channels": num_channels,
                 "num_layers": num_layers,
-                "k": k,
-                "sigma_deg": sigma_deg,
+                "kernel_size": kernel_size,
                 "lambda_m0": lambda_m0,
                 "lambda_m1": lambda_m1,
                 "anneal_epochs": anneal_epochs,
@@ -136,7 +135,7 @@ def objective(trial, args):
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
         # --- Model & Loss ---
-        model = SinoSheafNet(num_stalks=num_stalks, num_layers=num_layers).to(device)
+        model = GLMNet(num_channels=num_channels, num_layers=num_layers, kernel_size=kernel_size).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = CosineAnnealingLR(optimizer, T_max=args.n_epochs, eta_min=lr * 0.01)
         loss_fn = AnnealedLoss(geom, lambda_m0=lambda_m0, lambda_m1=lambda_m1, anneal_epochs=anneal_epochs).to(device)
@@ -160,12 +159,13 @@ def objective(trial, args):
                 data_list = []
                 for i in range(b_size):
                     inc_sino = incomplete[i, 0]
-                    data_list.append(create_sinogram_data(inc_sino, geom, sigma_deg=sigma_deg, graph_type="knn", k=k))
+                    data_list.append(create_glm_sinogram_data(inc_sino, geom))
 
                 graph_batch = Batch.from_data_list(data_list).to(device)
 
                 optimizer.zero_grad()
                 out = model(graph_batch)
+                
                 # Reshape output to [batch_size, num_views, num_detectors]
                 pred_sinos = out.view(b_size, geom.num_views, geom.det_col_count)
 
@@ -193,9 +193,7 @@ def objective(trial, args):
                     data_list = []
                     for i in range(b_size):
                         inc_sino = incomplete[i, 0]
-                        data_list.append(
-                            create_sinogram_data(inc_sino, geom, sigma_deg=sigma_deg, graph_type="knn", k=k)
-                        )
+                        data_list.append(create_glm_sinogram_data(inc_sino, geom))
 
                     graph_batch = Batch.from_data_list(data_list).to(device)
                     out = model(graph_batch)
@@ -245,7 +243,7 @@ def objective(trial, args):
                     global_best = -float("inf")
 
                 if val_ssim > global_best:
-                    model_save_path = PROJECT_ROOT / "outputs" / "2d" / "best_model_snn.pt"
+                    model_save_path = PROJECT_ROOT / "outputs" / "2d" / "best_model_glm.pt"
                     model_save_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(model.state_dict(), model_save_path)
 
@@ -305,7 +303,7 @@ def main():
         for key, value in study.best_trial.params.items():
             print(f"    {key}: {value}")
 
-        best_params_path = PROJECT_ROOT / "outputs" / "2d" / "best_snn_optuna_params.json"
+        best_params_path = PROJECT_ROOT / "outputs" / "2d" / "best_glm_optuna_params.json"
         best_params_path.parent.mkdir(parents=True, exist_ok=True)
         with open(best_params_path, "w") as f:
             json.dump(

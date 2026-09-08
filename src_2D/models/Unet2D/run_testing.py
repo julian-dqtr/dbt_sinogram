@@ -82,8 +82,8 @@ def main() -> None:
             for i in range(target_np.shape[0]):
                 t = target_np[i, 0]
                 o = output_np[i, 0]
-                batch_psnr += psnr(t, o, data_range=1.0) # Updated data_range to 1.0 since we clamped to [0, 1]
-                batch_ssim += ssim(t, o, data_range=1.0) # Updated data_range to 1.0 since we clamped to [0, 1]
+                batch_psnr += psnr(t, o, data_range=float(t.max() - t.min())) # Updated data_range to 1.0 since we clamped to [0, 1]
+                batch_ssim += ssim(t, o, data_range=float(t.max() - t.min())) # Updated data_range to 1.0 since we clamped to [0, 1]
 
             test_psnr += batch_psnr / target_np.shape[0]
             test_ssim += batch_ssim / target_np.shape[0]

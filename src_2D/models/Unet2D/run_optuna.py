@@ -22,11 +22,19 @@ def parse_args():
     parser.add_argument("--n-trials", type=int, default=50)
     parser.add_argument("--n-epochs", type=int, default=15)
     parser.add_argument("--n-samples", type=int, default=50)
+    parser.add_argument("--n-jobs", type=int, default=8, help="Number of parallel trials")
     parser.add_argument("--use-wandb", action="store_true", help="Log trials to W&B")
     return parser.parse_args()
 
 def objective(trial, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 0:
+        gpu_id = trial.number % num_gpus
+        device = torch.device(f"cuda:{gpu_id}")
+    else:
+        device = torch.device("cpu")
+        
+    print(f"[Trial {trial.number}] Using device {device}")
     
     if torch.cuda.is_available():
         probe = torch.randn(1, 1, 8, 8, device=device)
@@ -62,9 +70,7 @@ def objective(trial, args):
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # --- Model ---
-    model = SinogramUNet(in_channels=1, out_channels=1).to(device)
-    # Patch filters just for the test
-    model.network.filters = [filters_base, filters_base*2, filters_base*4, filters_base*8]
+    model = SinogramUNet(in_channels=1, out_channels=1, filters=filters_base).to(device)
     
     if optimizer_name == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -111,7 +117,7 @@ def objective(trial, args):
                 output_np = output.cpu().numpy()
                 batch_ssim = 0.0
                 for i in range(target_np.shape[0]):
-                    batch_ssim += ssim(target_np[i, 0], output_np[i, 0], data_range=1.0)
+                    batch_ssim += ssim(target_np[i, 0], output_np[i, 0], data_range=float(target_np[i, 0].max() - target_np[i, 0].min()))
                 val_ssim += batch_ssim / target_np.shape[0]
                 
         val_ssim /= max(1, len(val_loader))
@@ -134,6 +140,15 @@ def objective(trial, args):
             
         if val_ssim > best_ssim:
             best_ssim = val_ssim
+            try:
+                global_best = trial.study.best_value
+            except (ValueError, KeyError):
+                global_best = -float("inf")
+
+            if val_ssim > global_best:
+                model_save_path = PROJECT_ROOT / "outputs" / "2d" / "best_model_unet2d.pt"
+                model_save_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(model.state_dict(), model_save_path)
 
     if run is not None:
         run.finish()
@@ -142,8 +157,19 @@ def objective(trial, args):
 
 def main():
     args = parse_args()
-    study = optuna.create_study(direction="maximize", study_name="unet_2d_optimization")
-    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials, show_progress_bar=True)
+    
+    storage_name = f"sqlite:///{PROJECT_ROOT / 'db' / 'optuna_unet2d.db'}"
+    study_name = "unet2d_optimization"
+    
+    study = optuna.create_study(
+        direction="maximize", 
+        study_name=study_name, 
+        storage=storage_name, 
+        load_if_exists=True
+    )
+    
+    print(f"Starting Optuna search in this process...")
+    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials, show_progress_bar=False)
     
     print("\n=== Best Trial ===")
     print(f"Value (SSIM): {study.best_trial.value:.4f}")

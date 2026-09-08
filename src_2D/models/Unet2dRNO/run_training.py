@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.data.dataset_2d import SinogramCompletionDataset
-from src_2D.models.Unet2dRNO.evaluate_2d import (generate_example_figure,
+from src_2D.utils.evaluation import (generate_example_figure,
                                               resolve_compute_device,
                                               save_random_dataset_preview,
                                               save_training_curve)

@@ -10,6 +10,39 @@ from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 
 
+def get_soft_acquired_mask(geom: DBTGeometry, device: torch.device, blend_width_deg: float = 5.0) -> torch.Tensor:
+    """
+    Creates a Soft Data Consistency mask.
+    Returns a tensor of shape [1, 1, num_views, 1] for broadcasting.
+    Values are 1.0 inside the acquired angular window, and taper to 0.0 smoothly 
+    using a cosine window over `blend_width_deg` degrees on both sides.
+    """
+    config = DBTGeometryConfig()
+    angles_deg = np.rad2deg(geom.angles)
+    mask = np.zeros_like(angles_deg, dtype=np.float32)
+    
+    min_deg, max_deg = config.angle_min_deg, config.angle_max_deg
+    
+    for i, angle in enumerate(angles_deg):
+        if angle < min_deg - blend_width_deg:
+            mask[i] = 0.0
+        elif angle > max_deg + blend_width_deg:
+            mask[i] = 0.0
+        elif min_deg <= angle <= max_deg:
+            mask[i] = 1.0
+        elif angle < min_deg:
+            # Taper from 0 to 1 over blend_width_deg
+            x = (angle - (min_deg - blend_width_deg)) / blend_width_deg
+            mask[i] = 0.5 * (1 - np.cos(np.pi * x))
+        else: 
+            # Taper from 1 to 0 over blend_width_deg
+            x = (angle - max_deg) / blend_width_deg
+            mask[i] = 0.5 * (1 + np.cos(np.pi * x))
+            
+    mask_tensor = torch.tensor(mask, dtype=torch.float32, device=device)
+    return mask_tensor.view(1, 1, geom.num_views, 1)
+
+
 def build_full_astra_geometries(geometry_config: DBTGeometryConfig, image_shape: Tuple[int, int]):
     """Build the ASTRA (proj_geom, vol_geom) pair for the full-arc (-90..+90deg) sinogram."""
     import astra
@@ -69,7 +102,6 @@ def plot_qualitative_example(
     phantom: torch.Tensor,
     full_sinogram: torch.Tensor,
     incomplete_sinogram: torch.Tensor,
-    baseline_sinogram: torch.Tensor,
     refined_sinogram: torch.Tensor,
     reconstructed_image: Optional[np.ndarray],
     geometry_config: DBTGeometryConfig,
@@ -105,7 +137,9 @@ def plot_qualitative_example(
     def plot_sinogram(ax, sinogram: torch.Tensor, title: str):
         # [views, cols] -> transpose to [cols, views] so columns map to the angle axis.
         image = sinogram.detach().cpu().numpy().T
-        ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent, vmax=sino_vmax)
+        vmin_val = float(np.nanmin(image)) if not np.isnan(image).all() else 0.0
+        vmax_val = max(float(np.nanmax(image)) if not np.isnan(image).all() else 1.0, vmin_val + 1e-4)
+        ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent, vmin=vmin_val, vmax=vmax_val)
         ax.set_xlim(angle_min, angle_max)
         ax.set_title(title)
         ax.set_xlabel(r"Angle $\phi$ (degrees)")
@@ -127,21 +161,21 @@ def plot_qualitative_example(
         f"{geometry_config.angle_min_deg:.0f} deg to {geometry_config.angle_max_deg:.0f} deg)",
     )
 
-    plot_sinogram(axes[1, 0], baseline_sinogram, "4. Baseline Reconstruction (Sinusoidal Fit)")
-
-    plot_sinogram(axes[1, 1], refined_sinogram, "5. U-Net Reconstruction")
+    plot_sinogram(axes[1, 0], refined_sinogram, "4. U-Net Reconstruction")
 
     if reconstructed_image is not None:
-        vmax = float(phantom.max()) or 1.0
-        axes[1, 2].imshow(
-            reconstructed_image, cmap="gray", origin="lower", vmax=vmax, extent=image_extent
+        rec_min = float(np.nanmin(reconstructed_image)) if not np.isnan(reconstructed_image).all() else 0.0
+        rec_max = max(float(np.nanmax(reconstructed_image)) if not np.isnan(reconstructed_image).all() else 1.0, rec_min + 1e-4)
+        axes[1, 1].imshow(
+            reconstructed_image, cmap="gray", origin="lower", vmin=rec_min, vmax=rec_max, extent=image_extent
         )
-        axes[1, 2].set_title("6. FBP Reconstruction (from U-Net Sinogram)")
-        axes[1, 2].set_xlabel("X (mm)")
-        axes[1, 2].set_ylabel("Z (mm)")
+        axes[1, 1].set_title("5. FBP Reconstruction (from U-Net Sinogram)")
+        axes[1, 1].set_xlabel("X (mm)")
+        axes[1, 1].set_ylabel("Z (mm)")
     else:
-        axes[1, 2].axis("off")
-        axes[1, 2].set_title("6. FBP Reconstruction unavailable (ASTRA not found)")
+        axes[1, 1].axis("off")
+        axes[1, 1].set_title("5. FBP Reconstruction unavailable (ASTRA not found)")
+    axes[1, 2].axis("off")
 
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,33 +217,37 @@ def resolve_compute_device() -> torch.device:
         return torch.device("cpu")
 
 
-def generate_example_figure(model, dataset, device, geometry, args, run) -> None:
-    model.eval()
-    idx = random.randrange(len(dataset))
-    incomplete, full, phantom = dataset[idx]
-    with torch.no_grad():
-        refined_out = model(incomplete.unsqueeze(0).to(device))
-
-    reconstructed_image = None
+def generate_example_figure(model, dataset, device, geometry, args, wandb_run=None, acquired_mask=None):
     try:
-        proj_geom, vol_geom = build_full_astra_geometries(geometry, tuple(phantom.shape[1:]))
-        reconstructed_image = reconstruct_volume_fbp(
-            refined_out.squeeze(0).squeeze(0).cpu().numpy() * 100.0, proj_geom, vol_geom
+        model.eval()
+        idx = random.randrange(len(dataset))
+        incomplete, full, phantom = dataset[idx]
+        with torch.no_grad():
+            if acquired_mask is not None:
+                refined_out = model(incomplete.unsqueeze(0).to(device), acquired_mask)
+            else:
+                refined_out = model(incomplete.unsqueeze(0).to(device))
+
+        reconstructed_image = None
+        try:
+            proj_geom, vol_geom = build_full_astra_geometries(geometry, tuple(phantom.shape[1:]))
+            reconstructed_image = reconstruct_volume_fbp(
+                refined_out.squeeze(0).squeeze(0).cpu().numpy() * 100.0, proj_geom, vol_geom
+            )
+        except Exception as exc:
+            print(f"Skipping volume reconstruction panel ({exc}).")
+
+        save_path = args.figures_dir / "example_after_training.png"
+        fig = plot_qualitative_example(
+            phantom.squeeze(0), full.squeeze(0), incomplete.squeeze(0), refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
         )
+        print(f"Saved qualitative example to {save_path}")
+
+        if wandb_run is not None:
+            import wandb
+            wandb_run.log({"example_reconstruction": wandb.Image(str(save_path))})
     except Exception as exc:
-        print(f"Skipping volume reconstruction panel ({exc}).")
-
-    save_path = args.figures_dir / "example_after_training.png"
-    # Create a dummy baseline to not break the plotting function
-    dummy_baseline = torch.zeros_like(incomplete.squeeze(0))
-    fig = plot_qualitative_example(
-        phantom.squeeze(0), full.squeeze(0), incomplete.squeeze(0), dummy_baseline, refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
-    )
-    print(f"Saved qualitative example to {save_path}")
-
-    if run is not None:
-        import wandb
-        wandb.log({"example": wandb.Image(fig)})
+        print(f"Warning: Failed to generate example figure ({exc}). Continuing...")
 
 
 def save_random_dataset_preview(dataset, geometry, args) -> None:

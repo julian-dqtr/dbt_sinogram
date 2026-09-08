@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-# from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -23,12 +22,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.data.dataset_2d import SinogramCompletionDataset
-from src_2D.models.SinoSheavesNN.snn_model import SinoSheafNet
+from src_2D.models.GLM.glm_model import GLMNet
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
 from src_2D.utils.evaluation import get_soft_acquired_mask
-from src_2D.models.SinoSheavesNN.graph_data import create_sinogram_data
+from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src_2D.utils.evaluation import save_training_curve, save_random_dataset_preview, resolve_compute_device
+from src_2D.models.SinoSheavesNN.evaluate_2d import generate_snn_example_figure
 
 @torch.no_grad()
 def calibrate_loss(loss_fn, dataloader, geom, device, n_batches=5, is_distributed=False, local_rank=0):
@@ -45,8 +45,6 @@ def calibrate_loss(loss_fn, dataloader, geom, device, n_batches=5, is_distribute
             dist.broadcast(loss_fn.physics_loss_fn.scale_m1, src=0)
         if local_rank == 0:
             print(f'[Calibration] scale_m0={loss_fn.physics_loss_fn.scale_m0.item():.4e}  scale_m1={loss_fn.physics_loss_fn.scale_m1.item():.4e}')
-
-from src_2D.models.SinoSheavesNN.evaluate_2d import generate_snn_example_figure
 
 def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, local_rank, is_distributed):
     model.train()
@@ -66,7 +64,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, loca
         data_list = []
         for i in range(batch_size):
             inc_sino = incomplete_sino[i, 0] # [180, 128]
-            data_list.append(create_sinogram_data(inc_sino, geom))
+            data_list.append(create_glm_sinogram_data(inc_sino, geom))
         
         graph_batch = Batch.from_data_list(data_list).to(device)
         
@@ -117,7 +115,7 @@ def val_epoch(model, dataloader, loss_fn, geom, epoch, device, local_rank, is_di
             data_list = []
             for i in range(batch_size):
                 inc_sino = incomplete_sino[i, 0]
-                data_list.append(create_sinogram_data(inc_sino, geom))
+                data_list.append(create_glm_sinogram_data(inc_sino, geom))
             
             graph_batch = Batch.from_data_list(data_list).to(device)
             out = model(graph_batch)
@@ -136,21 +134,25 @@ def val_epoch(model, dataloader, loss_fn, geom, epoch, device, local_rank, is_di
     return avg_loss
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SinoSheavesNN")
+    parser = argparse.ArgumentParser(description="Train GLM Baseline")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=0.0003608)
+    parser.add_argument("--lr", type=float, default=5e-5) # Paper uses 5.10^-5
     parser.add_argument("--n_samples", type=int, default=2000)
-    parser.add_argument("--num_stalks", type=int, default=128)
-    parser.add_argument("--num_layers", type=int, default=6)
+    
+    # GLM Hyperparameters
+    parser.add_argument("--num_channels", type=int, default=24)
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--kernel_size", type=int, default=7)
+    
     parser.add_argument("--lambda_m0", type=float, default=0.0329)
     parser.add_argument("--lambda_m1", type=float, default=0.141)
     parser.add_argument("--anneal_epochs", type=int, default=12)
     parser.add_argument("--wandb_project", type=str, default="SinoSheavesNN")
-    parser.add_argument("--wandb_name", type=str, default="SNN-GLM-HeatKernel")
+    parser.add_argument("--wandb_name", type=str, default="GLM-Baseline")
     parser.add_argument("--use-wandb", action="store_true", help="Log metrics to W&B")
-    parser.add_argument("--checkpoint_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "checkpoints")
-    parser.add_argument("--figures_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "figures_snn")
+    parser.add_argument("--checkpoint_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "checkpoints_glm")
+    parser.add_argument("--figures_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "figures_glm")
     args = parser.parse_args()
 
     is_distributed = "LOCAL_RANK" in os.environ
@@ -188,7 +190,12 @@ def main():
     if local_rank == 0:
         save_random_dataset_preview(train_dataset, config, args)
     
-    model = SinoSheafNet(num_stalks=args.num_stalks, num_layers=args.num_layers).to(device)
+    model = GLMNet(
+        num_channels=args.num_channels, 
+        num_layers=args.num_layers, 
+        kernel_size=args.kernel_size
+    ).to(device)
+    
     if is_distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
         
@@ -203,6 +210,7 @@ def main():
     if local_rank == 0:
         print(f"Starting training for {args.epochs} epochs. Distributed: {is_distributed}")
         args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        args.figures_dir.mkdir(parents=True, exist_ok=True)
         
     best_val_loss = float('inf')
     train_losses = []
@@ -226,7 +234,7 @@ def main():
             if v_loss < best_val_loss:
                 best_val_loss = v_loss
                 model_to_save = model.module if is_distributed else model
-                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_snn_model.pt")
+                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_glm_model.pt")
                 print(f"  --> Saved new best model (Val Loss: {best_val_loss:.4f})")
                 
     if local_rank == 0:
@@ -234,8 +242,10 @@ def main():
         
         # Load best model for evaluation
         model_to_eval = model.module if is_distributed else model
-        model_to_eval.load_state_dict(torch.load(args.checkpoint_dir / "best_snn_model.pt", map_location=device))
+        model_to_eval.load_state_dict(torch.load(args.checkpoint_dir / "best_glm_model.pt", map_location=device))
         
+        # Hack to temporarily override generate_snn_example_figure's hardcoded paths if needed,
+        # but the evaluate script should respect the args.figures_dir.
         generate_snn_example_figure(model_to_eval, val_dataset, device, config, args, wandb.run if wandb.run is not None else None)
         print("Training completed.")
         
