@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -12,48 +12,54 @@ from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 
 def get_soft_acquired_mask(geom: DBTGeometry, device: torch.device, blend_width_deg: float = 5.0) -> torch.Tensor:
     """
-    Creates a Soft Data Consistency mask.
-    Returns a tensor of shape [1, 1, num_views, 1] for broadcasting.
-    Values are 1.0 inside the acquired angular window, and taper to 0.0 smoothly 
-    using a cosine window over `blend_width_deg` degrees on both sides.
+    Soft Data Consistency (DC) mask, shape [1, 1, num_views, 1] for broadcasting.
+
+    The mask is used as ``out = mask * measured + (1 - mask) * predicted``. Since the
+    measured sinogram is ZERO outside the acquired window, the mask must be exactly 0 on
+    every missing view, otherwise the prediction would be blended with zeros (i.e.
+    attenuated). The cosine taper therefore lives INSIDE the acquired window:
+
+    - 0.0 on every missing view,
+    - rises smoothly over ``blend_width_deg`` degrees starting from the first missing view,
+    - 1.0 in the core of the acquired window.
+
+    Every acquired view keeps a strictly positive weight, and the defining invariant is
+    ``DC(ground_truth) == ground_truth`` (checked in tests/test_dc_mask.py).
     """
-    config = DBTGeometryConfig()
-    angles_deg = np.rad2deg(geom.angles)
-    mask = np.zeros_like(angles_deg, dtype=np.float32)
-    
-    min_deg, max_deg = config.angle_min_deg, config.angle_max_deg
-    
-    for i, angle in enumerate(angles_deg):
-        if angle < min_deg - blend_width_deg:
-            mask[i] = 0.0
-        elif angle > max_deg + blend_width_deg:
-            mask[i] = 0.0
-        elif min_deg <= angle <= max_deg:
-            mask[i] = 1.0
-        elif angle < min_deg:
-            # Taper from 0 to 1 over blend_width_deg
-            x = (angle - (min_deg - blend_width_deg)) / blend_width_deg
-            mask[i] = 0.5 * (1 - np.cos(np.pi * x))
-        else: 
-            # Taper from 1 to 0 over blend_width_deg
-            x = (angle - max_deg) / blend_width_deg
-            mask[i] = 0.5 * (1 + np.cos(np.pi * x))
-            
+    angles_deg = np.rad2deg(np.asarray(geom.angles, dtype=np.float64))
+    acquired = np.asarray(geom.acquired_view_mask, dtype=bool)
+    mask = np.zeros(geom.num_views, dtype=np.float64)
+
+    if acquired.any():
+        idx = np.flatnonzero(acquired)
+        first, last = idx[0], idx[-1]
+        # Angular distance to the nearest missing view on each side. A side without any
+        # missing view (window touching the end of the full range) needs no taper.
+        dist_left = angles_deg - angles_deg[first - 1] if first > 0 else np.full_like(angles_deg, np.inf)
+        dist_right = angles_deg[last + 1] - angles_deg if last < geom.num_views - 1 else np.full_like(angles_deg, np.inf)
+        dist = np.minimum(dist_left, dist_right)
+
+        if blend_width_deg > 0:
+            ramp = np.clip(dist / blend_width_deg, 0.0, 1.0)
+            taper = 0.5 * (1.0 - np.cos(np.pi * ramp))
+        else:
+            taper = np.ones_like(dist)
+        mask[acquired] = taper[acquired]
+
     mask_tensor = torch.tensor(mask, dtype=torch.float32, device=device)
     return mask_tensor.view(1, 1, geom.num_views, 1)
 
 
+def apply_data_consistency(measured: torch.Tensor, predicted: torch.Tensor, soft_mask: torch.Tensor) -> torch.Tensor:
+    """Blend the measured views back into a predicted sinogram (see get_soft_acquired_mask)."""
+    return soft_mask * measured + (1.0 - soft_mask) * predicted
+
+
 def build_full_astra_geometries(geometry_config: DBTGeometryConfig, image_shape: Tuple[int, int]):
-    """Build the ASTRA (proj_geom, vol_geom) pair for the full-arc (-90..+90deg) sinogram."""
+    """Build the ASTRA (proj_geom, vol_geom) pair of the full-range ground-truth sinogram."""
     import astra
 
-    geometry = DBTGeometry(
-        angles=geometry_config.full_angles,
-        src_radius=geometry_config.src_radius_mm,
-        det_radius=geometry_config.det_radius_mm,
-        det_col_count=geometry_config.det_col_count,
-        det_pixel_size=geometry_config.det_pixel_size_mm,
-    )
+    geometry = DBTGeometry.from_config(geometry_config)
     proj_geom = geometry.get_astra_proj_geom()
 
     rows, cols = image_shape
@@ -67,8 +73,13 @@ def reconstruct_volume_fbp(
     sinogram_view_col: np.ndarray,
     proj_geom,
     vol_geom,
+    sirt_iterations: int = 100,
 ) -> Optional[np.ndarray]:
-    """Reconstruct a 2D image (FBP_CUDA) from a sinogram shaped [views, cols].
+    """Reconstruct a 2D image from a sinogram shaped [views, cols] (raw, un-normalised units).
+
+    Parallel-beam geometries use a true filtered back-projection (FBP_CUDA). ASTRA's FBP
+    does not support the legacy 'fanflat_vec' geometry, for which SIRT_CUDA is used instead
+    (an unfiltered back-projection is NOT a reconstruction).
 
     Returns ``None`` if ASTRA is unavailable, so callers can skip this panel gracefully.
     """
@@ -78,17 +89,22 @@ def reconstruct_volume_fbp(
         return None
 
     sinogram_astra = np.ascontiguousarray(sinogram_view_col.astype(np.float32))
+    use_fbp = proj_geom["type"] == "parallel"
 
     projector_id = astra.create_projector("cuda", proj_geom, vol_geom)
     sino_id = astra.data2d.create("-sino", proj_geom, sinogram_astra)
     reco_id = astra.data2d.create("-vol", vol_geom)
     try:
-        cfg = astra.astra_dict("BP_CUDA")
+        cfg: Dict[str, Any] = astra.astra_dict("FBP_CUDA" if use_fbp else "SIRT_CUDA")
         cfg["ProjectorId"] = projector_id
         cfg["ProjectionDataId"] = sino_id
         cfg["ReconstructionDataId"] = reco_id
+        if use_fbp:
+            cfg["option"] = {"FilterType": "ram-lak"}
+        else:
+            cfg["option"] = {"MinConstraint": 0.0}
         alg_id = astra.algorithm.create(cfg)
-        astra.algorithm.run(alg_id)
+        astra.algorithm.run(alg_id, 1 if use_fbp else sirt_iterations)
         reconstruction = np.asarray(astra.data2d.get(reco_id))
         astra.algorithm.delete(alg_id)
     finally:
@@ -143,7 +159,7 @@ def plot_qualitative_example(
         ax.set_xlim(angle_min, angle_max)
         ax.set_title(title)
         ax.set_xlabel(r"Angle $\phi$ (degrees)")
-        ax.set_ylabel("Detector width u (mm)")
+        ax.set_ylabel("Detector coordinate s (mm)")
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
@@ -152,16 +168,16 @@ def plot_qualitative_example(
     axes[0, 0].set_xlabel("X (mm)")
     axes[0, 0].set_ylabel("Z (mm)")
 
-    plot_sinogram(axes[0, 1], full_sinogram, "2. Full Sinogram (-90 deg to +90 deg)")
+    plot_sinogram(axes[0, 1], full_sinogram, "2. Full Sinogram (-90 deg to +90 deg, parallel-beam)")
 
     plot_sinogram(
         axes[0, 2],
         incomplete_sinogram,
-        f"3. Limited Sinogram (Stationary DBT, "
+        f"3. Limited-angle Sinogram ("
         f"{geometry_config.angle_min_deg:.0f} deg to {geometry_config.angle_max_deg:.0f} deg)",
     )
 
-    plot_sinogram(axes[1, 0], refined_sinogram, "4. U-Net Reconstruction")
+    plot_sinogram(axes[1, 0], refined_sinogram, "4. Completed Sinogram (model output)")
 
     if reconstructed_image is not None:
         rec_min = float(np.nanmin(reconstructed_image)) if not np.isnan(reconstructed_image).all() else 0.0
@@ -169,7 +185,7 @@ def plot_qualitative_example(
         axes[1, 1].imshow(
             reconstructed_image, cmap="gray", origin="lower", vmin=rec_min, vmax=rec_max, extent=image_extent
         )
-        axes[1, 1].set_title("5. FBP Reconstruction (from U-Net Sinogram)")
+        axes[1, 1].set_title("5. FBP Reconstruction (from completed sinogram)")
         axes[1, 1].set_xlabel("X (mm)")
         axes[1, 1].set_ylabel("Z (mm)")
     else:
@@ -182,9 +198,6 @@ def plot_qualitative_example(
     plt.savefig(save_path, dpi=120)
     plt.close(fig)
     return fig
-
-
-import random
 
 
 def resolve_compute_device() -> torch.device:
@@ -217,29 +230,27 @@ def resolve_compute_device() -> torch.device:
         return torch.device("cpu")
 
 
-def generate_example_figure(model, dataset, device, geometry, args, wandb_run=None, acquired_mask=None):
+def generate_example_figure(model, dataset, device, geometry, args, wandb_run=None, sample_index: int = 0):
+    """Save a qualitative figure for one sample. Every model shares the ``model(incomplete)`` signature."""
     try:
         model.eval()
-        idx = random.randrange(len(dataset))
-        incomplete, full, phantom = dataset[idx]
+        incomplete, full, phantom = dataset[sample_index % len(dataset)]
         with torch.no_grad():
-            if acquired_mask is not None:
-                refined_out = model(incomplete.unsqueeze(0).to(device), acquired_mask)
-            else:
-                refined_out = model(incomplete.unsqueeze(0).to(device))
+            refined_out = model(incomplete.unsqueeze(0).to(device))
 
         reconstructed_image = None
         try:
             proj_geom, vol_geom = build_full_astra_geometries(geometry, tuple(phantom.shape[1:]))
             reconstructed_image = reconstruct_volume_fbp(
-                refined_out.squeeze(0).squeeze(0).cpu().numpy() * 100.0, proj_geom, vol_geom
+                refined_out.squeeze(0).squeeze(0).cpu().numpy() * geometry.sino_norm, proj_geom, vol_geom
             )
         except Exception as exc:
             print(f"Skipping volume reconstruction panel ({exc}).")
 
         save_path = args.figures_dir / "example_after_training.png"
-        fig = plot_qualitative_example(
-            phantom.squeeze(0), full.squeeze(0), incomplete.squeeze(0), refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
+        plot_qualitative_example(
+            phantom.squeeze(0).cpu(), full.squeeze(0).cpu(), incomplete.squeeze(0).cpu(),
+            refined_out.squeeze(0).squeeze(0).cpu(), reconstructed_image, geometry, save_path
         )
         print(f"Saved qualitative example to {save_path}")
 
@@ -247,6 +258,9 @@ def generate_example_figure(model, dataset, device, geometry, args, wandb_run=No
             import wandb
             wandb_run.log({"example_reconstruction": wandb.Image(str(save_path))})
     except Exception as exc:
+        # A plotting failure must never cost a finished training run, but it must be visible.
+        import traceback
+        traceback.print_exc()
         print(f"Warning: Failed to generate example figure ({exc}). Continuing...")
 
 
@@ -255,7 +269,7 @@ def save_random_dataset_preview(dataset, geometry, args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    idx = random.randrange(len(dataset))
+    idx = 0
     incomplete, full, phantom = dataset[idx]
 
     row_min, row_max = geometry.image_extent_mm[0]
@@ -270,11 +284,11 @@ def save_random_dataset_preview(dataset, geometry, args) -> None:
         ax.imshow(image, cmap="bone", origin="lower", aspect="auto", extent=sino_extent)
         ax.set_title(title)
         ax.set_xlabel(r"Angle $\phi$ (degrees)")
-        ax.set_ylabel("Detector width u (mm)")
+        ax.set_ylabel("Detector coordinate s (mm)")
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    axes[0].imshow(phantom.detach().cpu().squeeze(0).numpy(), cmap="gray", origin="lower", extent=image_extent, vmin=-1.0, vmax=1.0)
-    axes[0].set_title(f"Random sample #{idx} (Ground truth phantom)")
+    axes[0].imshow(phantom.detach().cpu().squeeze(0).numpy(), cmap="gray", origin="lower", extent=image_extent, vmin=0.0, vmax=1.0)
+    axes[0].set_title(f"Sample #{idx} (Ground truth phantom)")
     axes[0].set_xlabel("X (mm)")
     axes[0].set_ylabel("Z (mm)")
 

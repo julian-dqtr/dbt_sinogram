@@ -1,148 +1,106 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing
+
+# Feature layout used throughout the graph models: [B, C, V, L]
+#   B batch, C = 2 * num_stalks channels, V views (graph nodes), L detector pixels.
+# Operations "within a view" are Conv2d with (1, n) kernels: they never mix views. (Without
+# cuDNN on the K80s, this layout is ~5x faster than a Conv1d over a [B*V, C, L] batch.)
 
 
-class LearnedRestrictionMap(nn.Module):
-    """
-    Learns residual corrections to the fixed SO(2) restriction maps.
+class ViewNorm(nn.Module):
+    """LayerNorm of each view separately, over its (channels, detector) entries.
 
-    The fixed geometric SO(2) maps encode the angular difference between views.
-    This module predicts a small (delta_cos, delta_sin) correction conditioned on
-    the source and destination node feature statistics (mean, std over detectors),
-    so the restriction maps can adapt to signal content while staying initialized
-    at the physically-motivated SO(2) values.
-
-    Input:
-        edge_attr:  [E, 4] fixed SO(2) maps [cos, -sin, sin, cos]
-        x_i_stats:  [E, 2] destination node stats (mean, std)
-        x_j_stats:  [E, 2] source node stats (mean, std)
-    Output:
-        refined_attr: [E, 4] learned restriction maps
+    Equivalent to GroupNorm(1, C) applied to every node: statistics are never shared between
+    views (so the normalisation does not leak information along the angular axis), and the
+    affine bias keeps constant (missing) views from being zeroed out.
     """
 
-    def __init__(self, hidden_dim: int = 16):
+    def __init__(self, channels: int, eps: float = 1e-5):
         super().__init__()
-        # Input: 4 (fixed SO2) + 2 (src stats) + 2 (dst stats) = 8
-        self.mlp = nn.Sequential(
-            nn.Linear(8, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 2),  # predicts (delta_cos, delta_sin)
-        )
-        # Initialize output layer to near-zero so initial maps = fixed SO(2)
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(1, channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
-    def forward(self, edge_attr, x_i_stats, x_j_stats):
-        # edge_attr: [E, 4], x_i_stats: [E, 2], x_j_stats: [E, 2]
-        inp = torch.cat([edge_attr, x_i_stats, x_j_stats], dim=1)  # [E, 8]
-        delta = self.mlp(inp)  # [E, 2] → (delta_cos, delta_sin)
-
-        cos_base = edge_attr[:, 0]  # original cos(Δθ)
-        sin_base = edge_attr[:, 2]  # original sin(Δθ)
-
-        cos_new = cos_base + delta[:, 0]
-        sin_new = sin_base + delta[:, 1]
-
-        # Rebuild the [cos, -sin, sin, cos] structure
-        refined = torch.stack([cos_new, -sin_new, sin_new, cos_new], dim=1)
-        return refined
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=(1, 3), keepdim=True)
+        var = x.var(dim=(1, 3), keepdim=True, unbiased=False)
+        return (x - mean) / torch.sqrt(var + self.eps) * self.weight + self.bias
 
 
-class SheafConv1D(MessagePassing):
+def detector_conv(in_channels: int, out_channels: int) -> nn.Conv2d:
+    """3-tap convolution along the detector axis only. Replicate padding: zero padding creates
+    spurious edges on constant rows (acquired flag, missing views) that normalisation amplifies."""
+    return nn.Conv2d(in_channels, out_channels, kernel_size=(1, 3), padding=(0, 1), padding_mode="replicate")
+
+
+class ViewGraphConv(nn.Module):
     """
-    A Custom Sheaf Convolution layer for sequence data (1D detector arrays).
-    Assumes node features have dimension [N, in_channels * 2, L],
-    representing `in_channels` independent 2D stalks along a sequence of length L.
-    Integrates Heat Kernel edge weights and uses learned SO(2) restriction maps.
+    Angular message passing between views, shared by the GCN baseline and the SNN.
+
+    Features [B, 2F, V, L] hold F two-dimensional stalks (consecutive channel pairs
+    (2f, 2f+1)) at each of the L detector pixels of each of the V views.
+
+        m_i   = sum_j A_hat[i, j] * R_ij x_j          (aggregation)
+        out_i = Conv1x1([x_i ; m_i])                  (update)
+
+    - GCN: R_ij = I, i.e. a standard normalised neighbourhood aggregation.
+    - SNN: R_ij = R(theta_i - theta_j) in SO(2), hard-coded by the acquisition angles and
+      applied to every stalk. Nothing about the transport is learned.
+
+    The two variants have exactly the same parameters; only the fixed operators differ.
     """
-    def __init__(self, in_channels, out_channels, aggr='mean'):
-        super().__init__(aggr=aggr, node_dim=0)
-        # in_channels and out_channels refer to the number of 2D stalks (F)
-        # We use a 1D Convolution instead of an MLP to update node states.
-        # This preserves and processes the spatial information.
-        self.conv_update = nn.Conv1d(in_channels * 4, out_channels * 2, kernel_size=1)
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-
-        # Learned restriction map module
-        self.learned_restriction = LearnedRestrictionMap(hidden_dim=16)
-
-    def forward(self, x, edge_index, edge_attr, edge_weight):
-        # x: [num_nodes, in_channels * 2, L]
-        # edge_index: [2, num_edges]
-        # edge_attr: [num_edges, 4] representing flattened 2x2 matrices
-        # edge_weight: [num_edges]
-
-        # Compute per-node summary statistics for the learned restriction maps
-        # x shape: [N, C, L] → stats shape: [N, 2] (mean, std over L)
-        node_mean = x.mean(dim=(1, 2))  # [N]
-        node_std = x.std(dim=(1, 2))    # [N]
-        node_stats = torch.stack([node_mean, node_std], dim=1)  # [N, 2]
-
-        # Gather stats for source (j) and destination (i) nodes
-        x_i_stats = node_stats[edge_index[1]]  # [E, 2]
-        x_j_stats = node_stats[edge_index[0]]  # [E, 2]
-
-        # Compute learned restriction maps
-        learned_edge_attr = self.learned_restriction(edge_attr, x_i_stats, x_j_stats)
-
-        # Start message passing with learned maps
-        out = self.propagate(edge_index, x=x, edge_attr=learned_edge_attr, edge_weight=edge_weight)
-
-        # out has shape [num_nodes, in_channels * 2, L] after aggregation
-        # Concatenate current features with aggregated messages along the channel dim
-        cat = torch.cat([x, out], dim=1)
-
-        return self.conv_update(cat)
-
-    def message(self, x_j, edge_attr, edge_weight):
-        # x_j is the features of the source nodes, shape: [num_edges, in_channels * 2, L]
-        num_edges = x_j.size(0)
-        L = x_j.size(2)
-
-        # Reshape to apply the 2x2 rotation to each 2D stalk
-        # x_j: [num_edges, in_channels, 2, L]
-        x_j_reshaped = x_j.view(num_edges, self.in_channels, 2, L)
-
-        # edge_attr: [num_edges, 1, 2, 2] so it broadcasts across in_channels
-        R = edge_attr.view(num_edges, 1, 2, 2)
-
-        # Matrix multiplication: R (2x2) @ x_j_reshaped (2xL)
-        msg = torch.matmul(R, x_j_reshaped)
-
-        # Flatten back to [num_edges, in_channels * 2, L]
-        msg = msg.view(num_edges, self.in_channels * 2, L)
-
-        # Weight the message by the Heat Kernel edge weight
-        msg = msg * edge_weight.view(-1, 1, 1)
-
-        return msg
-
-
-class SinoSheafBlock(nn.Module):
-    """
-    Hybrid Convolutional Sheaf Block with Instance Normalization.
-    1. Spatial processing (Conv1d + InstanceNorm1d)
-    2. Angular aggregation (SheafConv1D + InstanceNorm1d)
-    3. Spatial refinement (Conv1d) with residual connection
-    """
-    def __init__(self, channels):
-        # channels is the number of 2D stalks. So actual feature maps = channels * 2
+    def __init__(self, num_stalks: int):
         super().__init__()
-        self.conv1 = nn.Conv1d(channels * 2, channels * 2, kernel_size=3, padding=1)
-        self.norm1 = nn.InstanceNorm1d(channels * 2)
-        self.sheaf_conv = SheafConv1D(in_channels=channels, out_channels=channels)
-        self.norm2 = nn.InstanceNorm1d(channels * 2)
-        self.conv2 = nn.Conv1d(channels * 2, channels * 2, kernel_size=3, padding=1)
+        self.num_stalks = num_stalks
+        self.conv_update = nn.Conv2d(num_stalks * 4, num_stalks * 2, kernel_size=1)
 
-    def forward(self, x, edge_index, edge_attr, edge_weight):
-        # x: [num_nodes, channels * 2, L]
+    def aggregate(self, x: torch.Tensor, a_cos: torch.Tensor, a_sin: Optional[torch.Tensor]) -> torch.Tensor:
+        if a_sin is None:
+            # R = I: plain weighted aggregation of the neighbours.
+            return torch.einsum("ij,bcjl->bcil", a_cos, x)
+
+        B, C, V, L = x.shape
+        stalks = x.reshape(B, self.num_stalks, 2, V, L)
+        x_a, x_b = stalks[:, :, 0], stalks[:, :, 1]  # the two components of every stalk
+        # [m_a]   [cos  -sin] [x_a]
+        # [m_b] = [sin   cos] [x_b]   summed over the neighbours j with weights A_hat[i, j]
+        m_a = torch.einsum("ij,bfjl->bfil", a_cos, x_a) - torch.einsum("ij,bfjl->bfil", a_sin, x_b)
+        m_b = torch.einsum("ij,bfjl->bfil", a_sin, x_a) + torch.einsum("ij,bfjl->bfil", a_cos, x_b)
+        return torch.stack([m_a, m_b], dim=2).reshape(B, C, V, L)
+
+    def forward(self, x: torch.Tensor, a_cos: torch.Tensor, a_sin: Optional[torch.Tensor]) -> torch.Tensor:
+        messages = self.aggregate(x, a_cos, a_sin)
+        return self.conv_update(torch.cat([x, messages], dim=1))
+
+
+class ViewGraphBlock(nn.Module):
+    """
+    Residual block alternating detector-axis and angular processing:
+    1. detector conv + ViewNorm + GELU          (within each view)
+    2. ViewGraphConv + ViewNorm + GELU          (between views)
+    3. detector conv, residual connection       (within each view)
+
+    Steps 1 and 3 never mix views, so the angular reach of a block is exactly the one of
+    its single ViewGraphConv.
+    """
+
+    def __init__(self, num_stalks: int):
+        super().__init__()
+        channels = num_stalks * 2
+        self.conv1 = detector_conv(channels, channels)
+        self.norm1 = ViewNorm(channels)
+        self.graph_conv = ViewGraphConv(num_stalks)
+        self.norm2 = ViewNorm(channels)
+        self.conv2 = detector_conv(channels, channels)
+
+    def forward(self, x: torch.Tensor, a_cos: torch.Tensor, a_sin: Optional[torch.Tensor]) -> torch.Tensor:
         res = x
-        x = F.relu(self.norm1(self.conv1(x)))
-        x = self.sheaf_conv(x, edge_index, edge_attr, edge_weight)
-        x = F.relu(self.norm2(x))
+        x = F.gelu(self.norm1(self.conv1(x)))
+        x = self.graph_conv(x, a_cos, a_sin)
+        x = F.gelu(self.norm2(x))
         x = self.conv2(x)
-        return F.relu(x + res)
+        return x + res

@@ -28,7 +28,7 @@ from src_2D.utils.evaluation import get_soft_acquired_mask
 from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src_2D.utils.evaluation import save_training_curve, save_random_dataset_preview, resolve_compute_device
-from src_2D.models.SinoSheavesNN.evaluate_2d import generate_snn_example_figure
+from src_2D.utils.evaluation import generate_example_figure
 
 @torch.no_grad()
 def calibrate_loss(loss_fn, dataloader, geom, device, n_batches=5, is_distributed=False, local_rank=0):
@@ -66,7 +66,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, geom, epoch, device, loca
             inc_sino = incomplete_sino[i, 0] # [180, 128]
             data_list.append(create_glm_sinogram_data(inc_sino, geom))
         
-        graph_batch = Batch.from_data_list(data_list).to(device)
+        graph_batch = Batch.from_data_list(data_list).to(device)  # pyright: ignore[reportAttributeAccessIssue]  # Batch inherits Data dynamically
         
         # 2. Forward Pass
         optimizer.zero_grad()
@@ -117,7 +117,7 @@ def val_epoch(model, dataloader, loss_fn, geom, epoch, device, local_rank, is_di
                 inc_sino = incomplete_sino[i, 0]
                 data_list.append(create_glm_sinogram_data(inc_sino, geom))
             
-            graph_batch = Batch.from_data_list(data_list).to(device)
+            graph_batch = Batch.from_data_list(data_list).to(device)  # pyright: ignore[reportAttributeAccessIssue]  # Batch inherits Data dynamically
             out = model(graph_batch)
             pred_sinos = out.view(batch_size, geom.num_views, geom.det_col_count)
             
@@ -151,8 +151,8 @@ def main():
     parser.add_argument("--wandb_project", type=str, default="SinoSheavesNN")
     parser.add_argument("--wandb_name", type=str, default="GLM-Baseline")
     parser.add_argument("--use-wandb", action="store_true", help="Log metrics to W&B")
-    parser.add_argument("--checkpoint_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "checkpoints_glm")
-    parser.add_argument("--figures_dir", type=Path, default=PROJECT_ROOT / "outputs" / "2d" / "figures_glm")
+    parser.add_argument("--checkpoint-dir", type=Path, default=PROJECT_ROOT / "outputs/2d/checkpoints/GLM")
+    parser.add_argument("--figures-dir", type=Path, default=PROJECT_ROOT / "outputs/2d/visualisation/GLM")
     args = parser.parse_args()
 
     is_distributed = "LOCAL_RANK" in os.environ
@@ -216,7 +216,7 @@ def main():
     train_losses = []
     
     for epoch in range(1, args.epochs + 1):
-        if is_distributed:
+        if is_distributed and train_sampler is not None:
             train_sampler.set_epoch(epoch)
             
         t_loss = train_epoch(model, train_loader, optimizer, loss_fn, geom, epoch, device, local_rank, is_distributed)
@@ -233,20 +233,20 @@ def main():
             
             if v_loss < best_val_loss:
                 best_val_loss = v_loss
-                model_to_save = model.module if is_distributed else model
-                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_glm_model.pt")
+                model_to_save = getattr(model, "module", model) if is_distributed else model
+                torch.save(model_to_save.state_dict(), args.checkpoint_dir / "best_model.pt")
                 print(f"  --> Saved new best model (Val Loss: {best_val_loss:.4f})")
                 
     if local_rank == 0:
         save_training_curve(train_losses, args)
         
         # Load best model for evaluation
-        model_to_eval = model.module if is_distributed else model
-        model_to_eval.load_state_dict(torch.load(args.checkpoint_dir / "best_glm_model.pt", map_location=device))
+        model_to_eval = getattr(model, "module", model) if is_distributed else model
+        model_to_eval.load_state_dict(torch.load(args.checkpoint_dir / "best_model.pt", map_location=device))
         
         # Hack to temporarily override generate_snn_example_figure's hardcoded paths if needed,
         # but the evaluate script should respect the args.figures_dir.
-        generate_snn_example_figure(model_to_eval, val_dataset, device, config, args, wandb.run if wandb.run is not None else None)
+        generate_example_figure(model_to_eval, val_dataset, device, config, args, wandb.run if wandb.run is not None else None)
         print("Training completed.")
         
     if is_distributed:

@@ -8,8 +8,9 @@ from torch_geometric.typing import Adj, OptPairTensor, OptTensor
 from torch_geometric.utils import add_remaining_self_loops, scatter
 from torch_geometric.utils.num_nodes import maybe_num_nodes
 
+# This copy of PyG's gcn_norm only supports a dense edge_index (no SparseTensor).
 def gcn_norm(
-    edge_index: Adj,
+    edge_index: Tensor,
     edge_weight: OptTensor = None,
     num_nodes: Optional[int] = None,
     improved: bool = False,
@@ -84,10 +85,11 @@ class GLM_Module(MessagePassing):
         super().reset_parameters()
         self.conv1.reset_parameters()
         self.conv2.reset_parameters()
-        nn.init.constant_(self.conv2.bias, 0.1)
+        if self.conv2.bias is not None:
+            nn.init.constant_(self.conv2.bias, 0.1)
         self._cached_edge_index = None
 
-    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor = None) -> Tensor:
+    def forward(self, x: Tensor, edge_index: Tensor, edge_weight: OptTensor = None) -> Tensor:
         # x is expected to be of shape [n_nodes, in_channels, n_pixels]
         n_nodes = x.size(0)
         n_pixels = x.size(-1)
@@ -114,5 +116,5 @@ class GLM_Module(MessagePassing):
 
         return out + self.conv2(out)
 
-    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:  # type: ignore[override]  # PyG builds this signature dynamically
         return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j

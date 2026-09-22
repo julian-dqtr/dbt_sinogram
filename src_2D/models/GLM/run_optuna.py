@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import optuna
 import torch
-from skimage.metrics import structural_similarity as ssim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
@@ -26,6 +25,7 @@ from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
 from src_2D.models.GLM.glm_model import GLMNet
 from src_2D.utils.evaluation import get_soft_acquired_mask
+from src_2D.utils.metrics import ssim
 
 
 @torch.no_grad()
@@ -161,7 +161,7 @@ def objective(trial, args):
                     inc_sino = incomplete[i, 0]
                     data_list.append(create_glm_sinogram_data(inc_sino, geom))
 
-                graph_batch = Batch.from_data_list(data_list).to(device)
+                graph_batch = Batch.from_data_list(data_list).to(device)  # pyright: ignore[reportAttributeAccessIssue]  # Batch inherits Data dynamically
 
                 optimizer.zero_grad()
                 out = model(graph_batch)
@@ -195,7 +195,7 @@ def objective(trial, args):
                         inc_sino = incomplete[i, 0]
                         data_list.append(create_glm_sinogram_data(inc_sino, geom))
 
-                    graph_batch = Batch.from_data_list(data_list).to(device)
+                    graph_batch = Batch.from_data_list(data_list).to(device)  # pyright: ignore[reportAttributeAccessIssue]  # Batch inherits Data dynamically
                     out = model(graph_batch)
                     pred_sinos = out.view(b_size, geom.num_views, geom.det_col_count)
 
@@ -243,7 +243,7 @@ def objective(trial, args):
                     global_best = -float("inf")
 
                 if val_ssim > global_best:
-                    model_save_path = PROJECT_ROOT / "outputs" / "2d" / "best_model_glm.pt"
+                    model_save_path = PROJECT_ROOT / "outputs/2d/checkpoints/GLM/best_optuna_model.pt"
                     model_save_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(model.state_dict(), model_save_path)
 
@@ -303,7 +303,7 @@ def main():
         for key, value in study.best_trial.params.items():
             print(f"    {key}: {value}")
 
-        best_params_path = PROJECT_ROOT / "outputs" / "2d" / "best_glm_optuna_params.json"
+        best_params_path = PROJECT_ROOT / "outputs/2d/checkpoints/GLM/best_optuna_params.json"
         best_params_path.parent.mkdir(parents=True, exist_ok=True)
         with open(best_params_path, "w") as f:
             json.dump(

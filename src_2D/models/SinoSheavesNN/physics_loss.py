@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 
@@ -6,12 +8,22 @@ class HelgasonLudwigLoss(nn.Module):
     """
     Computes the 0th and 1st Helgason-Ludwig moment consistency losses for a sinogram.
 
-    The HLCC state that:
-    - 0th moment M(θ) = Σ_s p(s,θ)·ds should be *constant* across all views.
-    - 1st moment C(θ) = Σ_s s·p(s,θ)·ds should vary sinusoidally as A·cos(θ) + B·sin(θ).
+    The HLCC state that, for a PARALLEL-BEAM sinogram p(θ, s) = Rf(θ, s):
+    - 0th moment M(θ) = Σ_s p(s,θ)·ds should be *constant* across all views (total mass).
+    - 1st moment C(θ) = Σ_s s·p(s,θ)·ds should vary sinusoidally as A·cos(θ) + B·sin(θ)
+      (mass times the projection of the centre of mass on the detector axis).
+
+    These conditions are only valid for parallel-beam data: tests/test_physics_loss.py
+    checks that the ground truth of the configured geometry satisfies them.
 
     Input sinogram shape: [num_views, num_detectors] or [B, num_views, num_detectors].
     """
+
+    # Buffers registered in __init__, declared here so static checkers know their type.
+    s_positions: torch.Tensor
+    I_minus_P: torch.Tensor
+    scale_m0: torch.Tensor
+    scale_m1: torch.Tensor
 
     def __init__(self, geom):
         super().__init__()
@@ -45,24 +57,32 @@ class HelgasonLudwigLoss(nn.Module):
     def calibrate(self, sinogram: torch.Tensor) -> None:
         """
         Compute the raw physics losses on a reference sinogram and store their
-        magnitudes as normalisation constants. Call once before training begins
-        so that loss_m0 and loss_m1 are in the same ballpark as the MSE.
+        magnitudes as normalisation constants.
+
+        Calibrate on the ZERO-FILLED (incomplete) sinograms: the normalised loss then reads
+        as "fraction of the inconsistency of the naive input" (1.0 for zero-filling, ~0 for
+        the ground truth). Never calibrate on the ground truth, whose loss is ~0.
         """
         m0, m1 = self._raw_losses(sinogram)
-        self.scale_m0 = torch.clamp(m0.detach(), min=1e-8)
-        self.scale_m1 = torch.clamp(m1.detach(), min=1e-8)
+        self.scale_m0.copy_(torch.clamp(m0.detach(), min=1e-8).reshape(1))
+        self.scale_m1.copy_(torch.clamp(m1.detach(), min=1e-8).reshape(1))
 
     # ------------------------------------------------------------------
-    def _raw_losses(self, sinogram: torch.Tensor):
+    def moments(self, sinogram: torch.Tensor):
+        """Return the discretised moments (M0 [B, V], M1 [B, V]) of a sinogram."""
         if sinogram.dim() == 2:
             sinogram = sinogram.unsqueeze(0)  # [1, V, D]
+        M_theta = sinogram.sum(dim=2) * self.ds            # [B, V]
+        C_theta = (sinogram @ self.s_positions) * self.ds  # [B, V]
+        return M_theta, C_theta
+
+    def _raw_losses(self, sinogram: torch.Tensor):
+        M_theta, C_theta = self.moments(sinogram)
 
         # 0th moment: should be constant over views
-        M_theta = sinogram.sum(dim=2) * self.ds  # [B, V]
         loss_m0 = torch.var(M_theta, dim=1).mean()
 
         # 1st moment: should lie in span{cos,sin}
-        C_theta = (sinogram @ self.s_positions) * self.ds  # [B, V]
         residual = C_theta @ self.I_minus_P.t()            # [B, V]
         loss_m1 = (residual ** 2).sum(dim=1).mean() / self.num_views
 
@@ -106,17 +126,20 @@ class AnnealedLoss(nn.Module):
         self._calibrated = True
 
     # ------------------------------------------------------------------
+    def alpha(self, completed_epochs: int) -> float:
+        """Cosine warm-up of the physics weight: 0 before the first epoch, 1 after ``anneal_epochs``."""
+        if self.anneal_epochs <= 0:
+            return 1.0
+        t = min(1.0, max(0.0, completed_epochs / self.anneal_epochs))
+        return 0.5 * (1.0 - math.cos(math.pi * t))
+
     def forward(self, pred_sino: torch.Tensor, true_sino: torch.Tensor, current_epoch: int):
+        """``current_epoch`` is the number of COMPLETED epochs (0 during the first one)."""
         loss_data = self.data_loss_fn(pred_sino, true_sino)
 
         loss_m0_norm, loss_m1_norm = self.physics_loss_fn(pred_sino)
 
-        # Cosine warm-up: smoother than a linear ramp, avoids abrupt gradient changes
-        if self.anneal_epochs > 0:
-            t = min(1.0, current_epoch / self.anneal_epochs)
-            alpha = 0.5 * (1.0 - torch.cos(torch.tensor(t * 3.14159265)).item())
-        else:
-            alpha = 1.0
+        alpha = self.alpha(current_epoch)
 
         physics_term = alpha * (self.lambda_m0 * loss_m0_norm + self.lambda_m1 * loss_m1_norm)
         total_loss = loss_data + physics_term

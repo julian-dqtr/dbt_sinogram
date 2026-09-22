@@ -1,0 +1,8 @@
+{
+    "include": ["src_2D", "tests", "scripts"],
+    "exclude": ["**/__pycache__", ".venv", "wandb", "outputs", "db", "results"],
+    "venvPath": ".",
+    "venv": ".venv",
+    "typeCheckingMode": "standard",
+    "reportMissingTypeStubs": "none"
+}

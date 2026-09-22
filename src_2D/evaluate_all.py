@@ -1,187 +1,136 @@
+"""Evaluate every model of the protocol on the immutable TEST split.
+
+    python src_2D/evaluate_all.py
+    python src_2D/evaluate_all.py --models ZeroFilling LinearInterp UNet2D GCN_L6 SNN_L6 --num_samples 200
+
+Outputs (in --out_dir):
+    model_comparison_metrics.csv   one row per (sample, model): sinogram + image metrics
+    per_view_mse.csv               MSE of every view, per model: the error profile as a
+                                   function of the angular distance to the acquired window,
+                                   to be compared with the angular reach of each graph model.
+
+A model whose checkpoint is missing, legacy, or trained on another geometry is reported as
+NOT EVALUATED and left out of the table: a randomly initialised network is never scored.
+"""
 import argparse
-import random
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from skimage.metrics import mean_squared_error as mse
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
+from tqdm import tqdm
 
+# Allow script to be run directly by adding project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.data.dataset_2d import SinogramCompletionDataset
-from src_2D.utils.evaluation import resolve_compute_device
+from src_2D.geometry.dbt_geometry_2d import DBTGeometry
+from src_2D.models.factory import get_model
+from src_2D.utils.evaluation import build_full_astra_geometries, reconstruct_volume_fbp
+from src_2D.utils.metrics import sinogram_metrics, ssim
+
+torch.backends.cudnn.enabled = False
+
+DEFAULT_MODELS = [
+    "ZeroFilling", "LinearInterp", "UNet2D", "UNet2dHLCC",
+    "GCN_L6", "GCN_L12", "GCN_L18", "SNN_L6", "SNN_L12", "SNN_L18",
+]
 
 
-def load_model(model_name: str, device: torch.device):
-    """Factory function to load models. Returns (model_or_callable, is_nn_model)."""
-    if model_name == "UNet2D":
-        from src_2D.models.Unet2D.unet_2d import SinogramUNet
-        model = SinogramUNet(in_channels=1, out_channels=1, filters=32).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints/best_model.pt", map_location=device, weights_only=True))
-        return model, True
-    elif model_name == "UNet2dRNO":
-        from src_2D.models.Unet2dRNO.unet_rno import RadonInformedUNet
-        from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
-        geometry = DBTGeometryConfig()
-        model = RadonInformedUNet(geometry_config=geometry, in_channels=1, out_channels=1, filters=32).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints_rno/best_model.pt", map_location=device, weights_only=True))
-        return model, True
-    elif model_name == "UNet2dHLCC":
-        from src_2D.models.Unet2dHLCC.unet_hlcc import Unet2dHLCC
-        model = Unet2dHLCC(in_channels=1, out_channels=1, filters=32).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints_unet2dhlcc/best_unet2dhlcc_model.pt", map_location=device, weights_only=True))
-        return model, True
-    elif model_name == "SNN":
-        from src_2D.models.SinoSheavesNN.snn_model import SinoSheafNet
-        model = SinoSheafNet(num_stalks=128, num_layers=6).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints/best_snn_model.pt", map_location=device, weights_only=True))
-        return model, True
-    elif model_name == "GLM":
-        from src_2D.models.GLM.glm_model import GLMNet
-        model = GLMNet(num_channels=24, num_layers=3, kernel_size=7).to(device)
-        model.load_state_dict(torch.load("outputs/2d/checkpoints_glm/best_glm_model.pt", map_location=device, weights_only=True))
-        return model, True
-    elif model_name == "ZeroFilling":
-        from src_2D.models.baselines import zero_filling
-        return zero_filling, False
-    elif model_name == "LinearInterp":
-        from src_2D.models.baselines import linear_interpolation
-        return linear_interpolation, False
-    else:
-        raise ValueError(f"Unknown model name: {model_name}")
+def image_metrics(sinogram: np.ndarray, phantom: np.ndarray, config, proj_geom, vol_geom) -> dict:
+    """FBP of a (normalised) sinogram compared with the phantom (values in [0, 1], data_range = 1)."""
+    reco = reconstruct_volume_fbp(sinogram * config.sino_norm, proj_geom, vol_geom)
+    if reco is None:
+        raise RuntimeError("ASTRA is unavailable: the image-domain metrics cannot be computed.")
+    mse = float(np.mean((reco - phantom) ** 2))
+    return {
+        "img_psnr": float(10.0 * np.log10(1.0 / max(mse, 1e-12))),
+        "img_ssim": ssim(phantom, reco, data_range=1.0),
+    }
 
 
-def evaluate_models(models: dict, dataset, device, num_samples: int = 10):
-    """Evaluates a dictionary of models on the first `num_samples` of the dataset."""
-    results = []
+@torch.no_grad()
+def evaluate_models(models: dict, dataset, device, config: DBTGeometryConfig):
+    geom = DBTGeometry.from_config(config)
+    missing_views = ~geom.acquired_view_mask
+    proj_geom, vol_geom = build_full_astra_geometries(config, config.image_shape)
 
-    # We evaluate on a fixed subset to ensure fair comparison
-    num_samples = min(num_samples, len(dataset))
+    rows = []
+    per_view_sq_err = {name: np.zeros(geom.num_views) for name in models}
 
-    from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
-    config = DBTGeometryConfig()
-    from src_2D.utils.evaluation import get_soft_acquired_mask
-    from src_2D.geometry.dbt_geometry_2d import DBTGeometry
-    geom = DBTGeometry(
-        angles=config.full_angles,
-        src_radius=config.src_radius_mm,
-        det_radius=config.det_radius_mm,
-        det_col_count=config.det_col_count,
-        det_pixel_size=config.det_pixel_size_mm,
-    )
-    acquired_mask = get_soft_acquired_mask(geom, device)
-
-    for i in range(num_samples):
+    for i in tqdm(range(len(dataset)), desc="Evaluating samples"):
         incomplete, full, phantom = dataset[i]
-        incomplete_batch = incomplete.unsqueeze(0).to(device)
-        full_np = full.squeeze(0).cpu().numpy()
+        full_np = full[0].numpy()
+        phantom_np = phantom[0].numpy()
 
-        for model_name, (model_or_fn, is_nn) in models.items():
-            if is_nn:
-                model_or_fn.eval()
+        if i == 0:
+            rows.append({"Sample": -1, "Model": "GroundTruthSinogram (FBP reference)",
+                         **image_metrics(full_np, phantom_np, config, proj_geom, vol_geom)})
 
-            with torch.no_grad():
-                if model_name == "SNN":
-                    # SNN requires PyG Data conversion
-                    from src_2D.models.SinoSheavesNN.graph_data import create_sinogram_data
-                    from torch_geometric.data import Batch
-                    inc_sino = incomplete[0].to(device)  # [180, 128]
-                    graph_data = create_sinogram_data(inc_sino, geom).to(device)
-                    graph_batch = Batch.from_data_list([graph_data])
-                    refined_out = model_or_fn(graph_batch)  # [180, 128]
-                    refined_out = refined_out.unsqueeze(0).unsqueeze(0)  # [1, 1, 180, 128]
-                elif model_name == "GLM":
-                    # GLM requires PyG Data conversion
-                    from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
-                    from torch_geometric.data import Batch
-                    inc_sino = incomplete[0].to(device)  # [180, 128]
-                    graph_data = create_glm_sinogram_data(inc_sino, geom).to(device)
-                    graph_batch = Batch.from_data_list([graph_data])
-                    refined_out = model_or_fn(graph_batch)  # [180, 128]
-                    refined_out = refined_out.unsqueeze(0).unsqueeze(0)  # [1, 1, 180, 128]
-                elif model_name == "UNet2dHLCC":
-                    refined_out = model_or_fn(incomplete_batch, acquired_mask)
-                elif is_nn:
-                    refined_out = model_or_fn(incomplete_batch)
-                else:
-                    # Non-learned baseline (callable)
-                    refined_out = model_or_fn(incomplete_batch)
-
-            refined_np = refined_out.squeeze(0).squeeze(0).cpu().numpy()
-
-            val_mse = mse(full_np, refined_np)
-            val_psnr = psnr(full_np, refined_np, data_range=full_np.max() - full_np.min())
-            val_ssim = ssim(full_np, refined_np, data_range=full_np.max() - full_np.min())
-
-            results.append({
-                "Sample": i,
-                "Model": model_name,
-                "MSE": val_mse,
-                "PSNR": val_psnr,
-                "SSIM": val_ssim
+        for name, model in models.items():
+            # Every model, learned or not, shares the same interface.
+            pred = model(incomplete.unsqueeze(0).to(device))[0, 0].float().cpu().numpy()
+            per_view_sq_err[name] += ((pred - full_np) ** 2).mean(axis=1)
+            rows.append({
+                "Sample": i, "Model": name,
+                **sinogram_metrics(pred, full_np, missing_views),
+                **image_metrics(pred, phantom_np, config, proj_geom, vol_geom),
             })
 
-    return pd.DataFrame(results)
+    per_view = pd.DataFrame({name: err / len(dataset) for name, err in per_view_sq_err.items()})
+    per_view.insert(0, "angle_deg", np.rad2deg(geom.angles))
+    per_view.insert(1, "acquired", geom.acquired_view_mask)
+    return pd.DataFrame(rows), per_view
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate all 2D models")
-    parser.add_argument("--data_dir", type=str, default="data_generation_2D", help="Directory with the dataset")
-    parser.add_argument("--out_dir", type=str, default="outputs/evaluation", help="Directory to save output metrics")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic evaluation")
-    parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to evaluate")
+    parser = argparse.ArgumentParser(description="Evaluate all 2D models on the test split")
+    parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
+    parser.add_argument("--out_dir", type=Path, default=PROJECT_ROOT / "outputs/evaluation")
+    parser.add_argument("--num_samples", type=int, default=200, help="Size of the test split")
+    parser.add_argument("--noise_level", type=float, default=1e5)
     args = parser.parse_args()
-
-    args.out_dir = Path(args.out_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Set seed
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config = DBTGeometryConfig()
+    dataset = SinogramCompletionDataset(args.num_samples, split="test", noise_level=args.noise_level, geometry_config=config)
 
-    device = resolve_compute_device()
-
-    try:
-        dataset = SinogramCompletionDataset(n_samples=args.num_samples, is_validation_or_test=True)
-    except Exception as e:
-        print(f"Could not load dataset from {args.data_dir}: {e}")
-        return
-
-    model_names = [
-        "ZeroFilling",
-        "LinearInterp",
-        "UNet2D",
-        "UNet2dRNO",
-        "UNet2dHLCC",
-        "SNN",
-        "GLM",
-    ]
-
-    models = {}
-    for name in model_names:
+    models, info, skipped = {}, {}, {}
+    for name in args.models:
         try:
-            print(f"Loading {name}...")
-            models[name] = load_model(name, device)
-        except Exception as e:
-            print(f"Skipping {name} due to error: {e}")
+            model, is_nn = get_model(name, device, geometry_config=config)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            skipped[name] = str(exc).splitlines()[0]
+            continue
+        models[name] = model
+        info[name] = sum(p.numel() for p in model.parameters()) if isinstance(model, torch.nn.Module) else 0
 
+    for name, reason in skipped.items():
+        print(f"[NOT EVALUATED] {name}: {reason}")
     if not models:
-        print("No models loaded. Exiting.")
+        print("No model could be loaded. Train them first with src_2D/train.py.")
         return
 
-    print(f"Evaluating models on {args.num_samples} samples...")
-    df_results = evaluate_models(models, dataset, device, num_samples=args.num_samples)
+    results, per_view = evaluate_models(models, dataset, device, config)
+    results.to_csv(args.out_dir / "model_comparison_metrics.csv", index=False)
+    per_view.to_csv(args.out_dir / "per_view_mse.csv", index=False)
 
-    csv_path = args.out_dir / "model_comparison_metrics.csv"
-    df_results.to_csv(csv_path, index=False)
-    print(f"Saved metrics to {csv_path}")
+    metric_cols = ["mse_wedge", "psnr_wedge", "ssim_wedge", "ssim", "img_psnr", "img_ssim"]
+    per_model = results[results["Sample"] >= 0].groupby("Model", sort=False)[metric_cols]
+    mean, std = per_model.mean(), per_model.std()
+    summary = pd.DataFrame({"# Params": [f"{info[m]:,}" for m in mean.index]}, index=mean.index)
+    for col in metric_cols:
+        summary[col] = [f"{mean.loc[m, col]:.4f} ± {std.loc[m, col]:.4f}" for m in mean.index]
 
-    # Print summary
-    print("\nMean Metrics per Model:")
-    summary = df_results.groupby("Model")[["MSE", "PSNR", "SSIM"]].mean()
-    print(summary)
+    print(f"\nTest split: {len(dataset)} samples, sinogram data_range = 1.0, image metrics after FBP (ram-lak)")
+    print(results[results["Sample"] < 0][["Model", "img_psnr", "img_ssim"]].to_string(index=False))
+    print(summary.to_string())
+    print(f"\nSaved to {args.out_dir}/model_comparison_metrics.csv and per_view_mse.csv")
 
 
 if __name__ == "__main__":
