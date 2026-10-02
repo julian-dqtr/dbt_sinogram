@@ -24,13 +24,15 @@ det_radius = 60.0
 det_col_count = 128
 det_pixel_size = 2.5
 
-# Build the same stationary-detector geometry used by the training pipeline.
+# Ray-tracing check of the LEGACY stationary-detector fan-beam geometry (the training
+# pipeline now uses beam="parallel", validated by tests/test_geometry.py).
 dbt_geometry = DBTGeometry(
     angles=angles,
     src_radius=src_radius,
     det_radius=det_radius,
     det_col_count=det_col_count,
     det_pixel_size=det_pixel_size,
+    beam="fanflat_vec",
 )
 proj_geom = dbt_geometry.get_astra_proj_geom()
 vol_geom = astra.create_vol_geom(32, 128, -120, 120, 0, 60)

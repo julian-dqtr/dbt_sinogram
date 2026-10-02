@@ -50,11 +50,19 @@ logs/
 tb_logs/
 
 # Ignore personal notes and commands
-TODO.md
+todo.md
 commandes.md
 notes.md
 **/notes.md
 
 # Ignore database files (Optuna)
 *.db
+*.db-shm
+*.db-wal
 *.log
+db/
+
+# Ignore outputs
+outputs/
+
+# Update

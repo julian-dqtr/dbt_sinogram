@@ -1,58 +1,57 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from monai.networks.nets import DynUNet
+
+from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
+from src_2D.geometry.dbt_geometry_2d import DBTGeometry
+from src_2D.models.utils.custom_unet import CustomUNet
+from src_2D.utils.evaluation import apply_data_consistency, get_soft_acquired_mask
 
 
 class SinogramUNet(nn.Module):
-    """2D U-Net using MONAI's DynUNet (Dynamic U-Net) architecture."""
+    """2D U-Net on the sinogram (CustomUNet backbone: Resize+Conv, no checkerboard).
 
-    def __init__(self, in_channels: int = 1, out_channels: int = 1, filters: int = 16) -> None:
+    Same interface as every other model of the repo: ``completed = model(incomplete)`` with
+    [B, 1, Views, Detectors] tensors. The network predicts a residual on top of its input
+    and, if ``data_consistency`` is set, the measured views are blended back with the soft
+    mask of ``get_soft_acquired_mask`` (taper inside the acquired window).
+    """
+
+    # Buffer registered in __init__, declared here so static checkers know its type.
+    soft_mask: torch.Tensor
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        filters: int = 16,
+        data_consistency: bool = True,
+        blend_width_deg: float = 5.0,
+        geometry_config: Optional[DBTGeometryConfig] = None,
+    ) -> None:
         super().__init__()
         if filters <= 0:
             raise ValueError("filters must be a positive integer")
 
-        strides = [[1, 1], [2, 2], [2, 2], [2, 2]]
-        self.network = DynUNet(
-            spatial_dims=2,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=[[3, 3], [3, 3], [3, 3], [3, 3]],
-            filters=[filters, filters * 2, filters * 4, filters * 8],
-            strides=strides,
-            upsample_kernel_size=[[2, 2], [2, 2], [2, 2]],
-            norm_name="instance",
-            deep_supervision=False,
+        self.network = CustomUNet(in_channels=in_channels, out_channels=out_channels, filters=filters)
+        self.data_consistency = data_consistency
+
+        geom = DBTGeometry.from_config(geometry_config or DBTGeometryConfig())
+        # Derived from the geometry stored in the checkpoint, hence not persistent.
+        self.register_buffer(
+            "soft_mask", get_soft_acquired_mask(geom, torch.device("cpu"), blend_width_deg), persistent=False
         )
-        # DynUNet downsamples spatially by the product of strides along each axis
-        # (here 2*2*2=8 for H/W). The input must be a multiple of this factor so
-        # that encoder/decoder feature maps line up at the skip connections.
-        self._divisor = [1, 1]
-        for stride in strides:
-            for axis, s in enumerate(stride):
-                self._divisor[axis] *= s
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, apply_dc: Optional[bool] = None) -> torch.Tensor:
         if x.dim() != 4:
-            raise ValueError("Expected input shape [B, C, H, W]")
+            raise ValueError(f"Expected input shape [B, C, Views, Detectors], got {tuple(x.shape)}")
 
-        original_shape = x.shape[-2:]
-        x = self._pad_to_divisor(x)
-        out = self.network(x)
-        return self._crop_to_shape(out, original_shape)
+        out = x + self.network(x)  # residual learning (padding handled inside CustomUNet)
 
-    def _pad_to_divisor(self, x: torch.Tensor) -> torch.Tensor:
-        h, w = x.shape[-2:]
-        pad_h = (-h) % self._divisor[0]
-        pad_w = (-w) % self._divisor[1]
-        if pad_h or pad_w:
-            # F.pad takes padding from the last dimension backwards: (W, H).
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
-        return x
-
-    @staticmethod
-    def _crop_to_shape(x: torch.Tensor, shape: torch.Size) -> torch.Tensor:
-        h, w = shape
-        return x[..., :h, :w]
+        use_dc = self.data_consistency if apply_dc is None else apply_dc
+        if use_dc:
+            out = apply_data_consistency(x, out, self.soft_mask)
+        return out
