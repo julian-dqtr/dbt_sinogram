@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -62,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=0, help="Early stopping patience in epochs (0 disables)")
     # Data
     parser.add_argument("--n_samples", type=int, default=2000, help="Size of the fixed training set")
+    parser.add_argument("--train_repeats", type=int, default=1,
+                        help="Passes over the training set per epoch. A small training set repeated so that "
+                             "n_samples x train_repeats stays constant keeps the optimisation budget (steps, "
+                             "validations, schedules) of the reference run: only the number of distinct phantoms changes")
     parser.add_argument("--n_val", type=int, default=200, help="Size of the fixed validation set")
     parser.add_argument("--noise_level", type=float, default=1e5, help="Poisson I0 (<= 0 disables noise)")
     parser.add_argument("--seed", type=int, default=0)
@@ -77,8 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad_checkpoint", action="store_true", help="Save memory in deep graph models")
     # Physics (HLCC) loss. "auto": on for UNet2dHLCC, off for every other model.
     parser.add_argument("--physics", type=str, default="auto", choices=["auto", "none", "hlcc"])
-    parser.add_argument("--lambda_m0", type=float, default=0.1)
-    parser.add_argument("--lambda_m1", type=float, default=0.1)
+    # Lambdas are small on purpose: see AnnealedLoss (with 0.1 the physics gradient is 26-52x the MSE one).
+    parser.add_argument("--lambda_m0", type=float, default=1e-3)
+    parser.add_argument("--lambda_m1", type=float, default=1e-3)
+    parser.add_argument("--lambda_high", type=float, default=1e-3, help="Shared weight of the HLCC orders >= 2")
+    parser.add_argument("--hlcc_max_order", type=int, default=1, help="Highest HLCC order of the physics loss (1: orders 0 and 1)")
     parser.add_argument("--anneal_epochs", type=int, default=20)
     # Outputs / logging
     parser.add_argument("--run_name", type=str, default=None, help="Defaults to <model> or <model>_L<num_layers>")
@@ -142,11 +149,8 @@ def calibrate_physics(loss_fn: AnnealedLoss, val_dataset, device) -> Dict[str, f
     n = min(CALIBRATION_SAMPLES, len(val_dataset))
     reference = torch.stack([val_dataset[i][0][0] for i in range(n)]).to(device)  # [n, V, D]
     loss_fn.calibrate(reference)
-    return {
-        "scale_m0": loss_fn.physics_loss_fn.scale_m0.item(),
-        "scale_m1": loss_fn.physics_loss_fn.scale_m1.item(),
-        "calibration_samples": n,
-    }
+    scales = loss_fn.physics_loss_fn.scales.tolist()
+    return {**{f"scale_m{order}": scale for order, scale in enumerate(scales)}, "calibration_samples": n}
 
 
 def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
@@ -184,8 +188,12 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     train_dataset = SinogramCompletionDataset(args.n_samples, split="train", noise_level=args.noise_level, geometry_config=geometry_config)
     val_dataset = SinogramCompletionDataset(args.n_val, split="val", noise_level=args.noise_level, geometry_config=geometry_config)
 
-    train_sampler = DistributedSampler(train_dataset, seed=args.seed) if is_distributed else None
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=train_sampler is None, sampler=train_sampler, drop_last=True)
+    if args.train_repeats < 1:
+        raise ValueError(f"--train_repeats must be >= 1, got {args.train_repeats}")
+    # The same phantoms seen several times per epoch (different batches every time, thanks to the shuffling).
+    train_data = ConcatDataset([train_dataset] * args.train_repeats) if args.train_repeats > 1 else train_dataset
+    train_sampler = DistributedSampler(train_data, seed=args.seed) if is_distributed else None
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=train_sampler is None, sampler=train_sampler, drop_last=True)
     # Validation is sharded WITHOUT padding so that the reduced metrics are exact.
     val_shard = Subset(val_dataset, range(rank, len(val_dataset), world_size))
     val_loader = DataLoader(val_shard, batch_size=args.batch_size, shuffle=False)
@@ -197,7 +205,9 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     ddp_model = DDP(model, device_ids=[device.index]) if is_distributed else model
 
     physics = uses_physics(args)
-    loss_fn = AnnealedLoss(geom, args.lambda_m0, args.lambda_m1, args.anneal_epochs).to(device)
+    loss_fn = AnnealedLoss(geom, args.lambda_m0, args.lambda_m1, args.anneal_epochs,
+                           lambda_high=args.lambda_high, max_order=args.hlcc_max_order).to(device)
+    num_orders = args.hlcc_max_order + 1
     calibration = calibrate_physics(loss_fn, val_dataset, device) if physics else {}
     mse_fn = torch.nn.MSELoss()
 
@@ -207,6 +217,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     run = None
     if is_main:
         print(f"[{run_name}] {num_params:,} parameters | physics={physics} {calibration} | world_size={world_size} | device={device}")
+        print(f"[{run_name}] training set: {args.n_samples} phantoms x {args.train_repeats} pass(es) per epoch")
         if hasattr(model, "angular_reach_deg"):
             print(f"[{run_name}] angular reach = {model.angular_reach_deg:.1f} deg "
                   f"(farthest missing view: {np.rad2deg(np.abs(geom.angles[missing_views]).max()) - geometry_config.angle_max_deg:.1f} deg from the acquired window)")
@@ -237,7 +248,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
 
         # ---- Train ----
         ddp_model.train()
-        sums = torch.zeros(5, dtype=torch.float64, device=device)  # total, mse, m0, m1, batches
+        sums = torch.zeros(3 + num_orders, dtype=torch.float64, device=device)  # total, mse, batches, HLCC orders
         iterator = tqdm(train_loader, desc=f"Epoch {epoch} [train]", leave=False, disable=not is_main)
         for step, (incomplete, target, _) in enumerate(iterator):
             if args.max_train_batches and step >= args.max_train_batches:
@@ -245,24 +256,25 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
             incomplete, target = incomplete.to(device), target.to(device)
             pred = ddp_model(incomplete)
             if physics:
-                loss, l_mse, l_m0, l_m1 = loss_fn(pred[:, 0], target[:, 0], epoch - 1)
+                loss, l_mse, l_physics = loss_fn(pred[:, 0], target[:, 0], epoch - 1)
             else:
                 loss = l_mse = mse_fn(pred, target)
-                l_m0 = l_m1 = torch.zeros((), device=device)
+                l_physics = torch.zeros(num_orders, device=device)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
-            sums += torch.tensor([loss.item(), l_mse.item(), float(l_m0), float(l_m1), 1.0], dtype=torch.float64, device=device)
+            sums[:3] += torch.tensor([loss.item(), l_mse.item(), 1.0], dtype=torch.float64, device=device)
+            sums[3:] += l_physics.detach().double()
 
         # The scheduler must step on EVERY rank, otherwise the replicas train with different learning rates.
         scheduler.step()
         sums = _reduce_sum(sums, is_distributed)
-        n_batches = max(1.0, sums[4].item())
+        n_batches = max(1.0, sums[2].item())
         train_log = {"train/loss": sums[0].item() / n_batches, "train/mse": sums[1].item() / n_batches,
-                     "train/hlcc_m0": sums[2].item() / n_batches, "train/hlcc_m1": sums[3].item() / n_batches}
+                     **{f"train/hlcc_m{order}": sums[3 + order].item() / n_batches for order in range(num_orders)}}
 
         # ---- Validate ----
         ddp_model.eval()
@@ -307,8 +319,9 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
         raise RuntimeError("No epoch was run: --n_epochs must be >= 1.")
 
     if is_main and save:
-        stats = {"training_time_seconds": time.time() - start_time, "num_params": num_params, "best": best,
-                 "baselines": baselines, "epochs_run": len(history)}
+        stats = {"training_time_seconds": time.time() - start_time, "world_size": world_size, "num_params": num_params,
+                 "n_samples": args.n_samples, "train_repeats": args.train_repeats,
+                 "best": best, "baselines": baselines, "epochs_run": len(history)}
         (checkpoint_dir / "training_stats.json").write_text(json.dumps(stats, indent=2))
         (checkpoint_dir / "history.json").write_text(json.dumps(history, indent=2))
         save_training_curve([h["train/loss"] for h in history], args)

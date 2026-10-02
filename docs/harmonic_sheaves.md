@@ -12,7 +12,7 @@ script.
 
 ---
 
-## 0. L'idée en dix lignes
+## 0. L'idée en neuf points
 
 1. Un sinogramme parallèle n'est pas une image quelconque : ses moments
    $M_k(\theta)=\int s^k\,p(\theta,s)\,ds$ sont des polynômes trigonométriques très
@@ -34,15 +34,23 @@ script.
    Dirichlet de faisceau est nulle »*. C'est un théorème, pas une analogie.
 6. **Compléter** les moments manquants revient alors à résoudre un problème de Dirichlet
    discret (*extension harmonique*) : on fixe les vues acquises et on minimise l'énergie sur
-   les vues manquantes. Avec les bonnes rotations c'est exact (erreur $5\cdot10^{-15}$) ;
-   avec $R=I$, c'est-à-dire le lissage que fait un GCN, l'erreur est de 66 %.
+   les vues manquantes. Si l'on connaît exactement une section (signal **et** quadrature) sur
+   les vues acquises, c'est exact avec les bonnes rotations (erreur $5\cdot10^{-15}$), et faux
+   à 66 % avec $R=I$, c'est-à-dire le lissage que fait un GCN. Ce $10^{-15}$ vérifie
+   l'opérateur, pas une performance : sur de vrais moments (scalaires, sans quadrature),
+   l'erreur est de 0,1 % à $k=1$ et diverge au-delà de $k\approx5$ (section 5.4).
 7. Limite honnête : cela ne fixe qu'une quinzaine de nombres par sinogramme (ordres
    $k\le4$), car l'extrapolation depuis ±25° devient instable au-delà. Le faisceau est un
    **régulariseur bas-ordre exact**, pas un moteur de complétion.
 8. Un faisceau à connexion plate + attention = **attention rotative (RoPE) sur l'angle
    d'acquisition, à fréquences entières**. C'est la forme naturelle d'un « Sheaf
    Transformer » pour ce problème, et elle supprime la limite de portée angulaire des GNN
-   locaux que documente le mémoire.
+   locaux que documente le mémoire. Elle ne supprime **pas** la limite géométrique : c'est la
+   même connexion plate que celle du SNN.
+9. Le vrai lien physique entre deux vues voisines est un **décalage le long du détecteur**,
+   proportionnel à la profondeur du point le long du rayon, inconnue. Aucune rotation de
+   canaux à position $s$ fixée ne le représente, et la symétrie $SO(2)$ de la transformée de
+   Radon est déjà une simple translation en $\theta$ (section 6, point 5).
 
 ---
 
@@ -191,6 +199,12 @@ $R_{uv}$ en $g_u^{-1}R_{uv}g_v$. Une connexion plate sur un graphe connexe peut 
 être ramenée à $R_{uv}=I$ par un changement de jauge : le faisceau est alors *isomorphe* au
 faisceau constant. Ce point est crucial pour interpréter honnêtement le SNN (section 6).
 
+Un cas particulier évident : si $R_{uv}=g_ug_v^{-1}$ pour des $g_v$ fixés, le transport est une
+**jauge pure**. L'holonomie de tout cycle vaut $g_ug_u^{-1}=I$, et le changement de jauge
+$y_v=g_v^{-1}x_v$ donne directement $R_{uv}=I$. Cela vaut pour **n'importe quel** graphe,
+cycles compris. La platitude ne tient donc pas à la forme du graphe, mais à la forme du
+transport.
+
 ---
 
 ## 3. Le faisceau des vues
@@ -321,7 +335,8 @@ d'une section globale, l'unique minimiseur **est** cette section (énergie nulle
 
 Sur un fantôme du jeu de validation, on relève $M_1$ en section de $\mathcal F^{(1)}$, on
 ne garde que les 51 vues acquises et on résout le système ci-dessus sur le graphe kNN
-$k=12$ :
+$k=12$. La section relevée est l'ajustement de $M_1$ sur les 180 vues, quadrature comprise :
+les données imposées sur $A$ sont donc **exactement** une section.
 
 | Faisceau utilisé pour l'extension | Erreur relative sur le wedge |
 |---|---|
@@ -334,11 +349,31 @@ l'interpolation la plus lisse possible, qui aplatit la sinusoïde. C'est la diff
 conceptuelle entre les deux modèles de l'ablation : le GCN diffuse vers « constant », le SNN
 diffuse vers « harmonique de fréquence $m$ ».
 
+**Ce que ce chiffre prouve, et ce qu'il ne prouve pas.** Le $4.6\cdot10^{-15}$ vérifie une
+identité d'opérateurs (le noyau de $L_{\mathcal F^{(1)}}$ est bien l'espace des sections),
+pas une capacité de complétion. Sur de vraies données, trois choses changent :
+
+- la quadrature n'est pas mesurée (section 5.3) ;
+- les mesures sont bruitées, et la vérité terrain n'est harmonique qu'à $10^{-3}$ près
+  (erreur de discrétisation, section 1.3) ;
+- l'extrapolation est mal conditionnée.
+
+L'erreur réaliste est celle de la section 5.4 : 0,1 % à $k=1$, 5 % à $k=4$, divergente
+au-delà. Et ce n'est pas ce que fait le SNN, qui diffuse des canaux appris et non des
+moments (section 6, point 3).
+
 ### 5.3 Si la quadrature n'est pas mesurée
 
 En pratique on mesure $M_k$ (scalaire) et pas sa quadrature. L'extension harmonique devient
 un moindres carrés sur les coefficients $(a_m,b_m)$ ajustés sur $A$ puis évalués sur $U$ :
 pour $k=1$ c'est la « régression HL » de Huang et al. (2017).
+
+C'est ce que fait `HLCCMomentProjection` (`src_2D/utils/hlcc.py`, modèles `_P4`) pour les
+ordres 0 à 4. Une étape de synthèse corrige ensuite chaque vue manquante pour qu'elle porte
+les moments prolongés. Appliquée après le UNet2D, elle réduit la MSE du wedge de 11 % (2000
+fantômes d'entraînement) et de 27 % (200 fantômes) : voir `docs/hlcc_projection.md`, section 7.
+C'est l'usage du faisceau qui donne le gain le plus net du repo : comme pénalité dans la
+perte (section 4.2), il apporte au mieux −4 %.
 
 ### 5.4 Limite fondamentale : le conditionnement
 
@@ -370,12 +405,21 @@ d'un a priori appris.
    $\mathcal F^{(1)}$, à chaque paire de canaux. C'est un cas particulier des sheaf NN à
    Laplacien de connexion (Barbero et al. 2022) et des Bundle NN (Bamberger et al.), avec une
    connexion **fixée par la géométrie d'acquisition** au lieu d'être apprise.
-2. **La connexion est plate.** $R(\theta_u-\theta_v)=R(\theta_u)R(\theta_v)^\top$ : holonomie
-   triviale. Par le changement de jauge $y_v=R(-\theta_v)x_v$, la partie linéaire du SNN
-   devient celle du GCN. La différence entre les deux modèles est donc **le repère dans
-   lequel agissent les non-linéarités et les convolutions**, c'est-à-dire une façon
-   structurée d'injecter l'angle absolu (un encodage positionnel rotatif). C'est une
-   hypothèse testable, et c'est exactement ce que teste l'ablation GCN vs SNN.
+2. **La connexion est plate.** $R(\theta_u-\theta_v)=R(\theta_u)R(\theta_v)^\top$ est une jauge
+   pure (section 2.5) : holonomie triviale sur tout cycle. Ce n'est pas une conséquence de la
+   forme en chemin du graphe des vues : le graphe kNN $k=12$ contient des cycles, et le
+   graphe complet aussi. Numériquement, les Laplaciens de $\mathcal F^{(0)},\dots,\mathcal F^{(3)}$
+   ont exactement le même spectre ($\lambda_3=2.770\cdot10^{-2}$ pour tous, voir le script).
+   Par le changement de jauge $y_v=R(-\theta_v)x_v$, l'**opérateur d'agrégation** du SNN
+   devient celui du GCN. Le reste du réseau, lui, ne devient pas celui du GCN : les couches
+   qui mélangent les canaux (conv 1×1 de mise à jour, convolutions détecteur, affine de
+   `ViewNorm`) et GELU ne sont pas équivariantes $SO(2)$. Dans le nouveau repère, leurs poids
+   deviennent $R(-\theta_v)\,W\,R(\theta_v)$ (par paire de canaux), et dépendent donc de la vue.
+   Le SNN équivaut ainsi à **un GCN dont les poids sont modulés par l'angle absolu**, pas au
+   GCN lui-même. La différence entre les deux modèles est **le repère dans lequel agissent
+   les non-linéarités et les convolutions**, c'est-à-dire une façon structurée d'injecter
+   l'angle absolu (un encodage positionnel rotatif). C'est une hypothèse testable, et c'est
+   exactement ce que teste l'ablation GCN vs SNN.
 3. **Les fibres ne sont pas des moments.** La rotation est appliquée à des canaux bruts,
    identiquement aux 128 pixels du détecteur. Or le théorème de la section 4 porte sur des
    *moments* (intégrales le long du détecteur), avec *une fréquence par ordre*. Le SNN
@@ -388,10 +432,43 @@ d'un a priori appris.
    exacte, quels que soient les poids. Et la diffusion est lente : la première valeur propre
    non nulle du Laplacien du graphe kNN (degré 12) vaut $0.028$, soit un trou spectral
    normalisé de l'ordre de $2\cdot10^{-3}$.
+5. **Le transport physique entre vues est un décalage, pas une rotation.** Un point
+   $\mathbf x$ de l'objet se projette en $s=\mathbf x\cdot\mathbf u_\theta$. Notons
+   $t=\mathbf x\cdot\mathbf u_\theta^\perp$, avec $\mathbf u_\theta^\perp=(-\sin\theta,\cos\theta)$,
+   sa position le long du rayon (sa « profondeur »). Dans la vue voisine,
+
+   $$s(\theta+\Delta\theta)=s\cos\Delta\theta+t\sin\Delta\theta\approx s+t\,\Delta\theta .$$
+
+   L'information se **déplace le long du détecteur**, d'une quantité proportionnelle à une
+   profondeur que la vue ne mesure pas. Avec les pixels de 1,6 mm du repo, un point à
+   $|t|=50$ mm de l'axe se déplace d'environ 0,9 mm (½ pixel) d'une vue à la suivante, et de
+   5 mm (3 pixels) sur les 6 vues de portée d'une couche. Deux points qui se superposent
+   dans une vue (même $s$, profondeurs différentes) se séparent dans la vue voisine. Il
+   n'existe donc **aucune application fixée par la géométrie qui envoie une vue sur sa
+   voisine**, même non linéaire : la vue voisine dépend de la répartition en profondeur.
+   Une rotation $R(\theta_i-\theta_j)$ appliquée de la même façon à chaque pixel $s$ ne
+   représente pas ce transport. Les convolutions détecteur `(1, 3)` peuvent apprendre un
+   décalage d'un pixel, mais pas un décalage qui dépend de $t$. Les seules quantités dont le
+   transport est fixé par la géométrie seule sont les moments, décomposés en harmoniques :
+   c'est exactement le faisceau des sections 3 et 4.
+
+   **La symétrie $SO(2)$ de la transformée de Radon est déjà une translation en $\theta$.**
+   Tourner l'objet d'un angle $\alpha$ décale le sinogramme :
+   $p_{R_\alpha f}(\theta,s)=p_f(\theta-\alpha,s)$. Tout opérateur invariant par translation le
+   long de $\theta$ respecte déjà cette symétrie, aux bords du chemin et au masque
+   d'acquisition près. C'est le cas d'une convolution en $\theta$, ou d'un graphe des vues
+   dont les poids ne dépendent que de $|\theta_i-\theta_j|$, comme le GCN du repo. Les
+   rotations de canaux du SNN n'ajoutent donc aucune équivariance. $SO(2)$ n'agit comme une
+   rotation, c'est-à-dire comme une phase $e^{-im\alpha}$, que sur les **harmoniques
+   angulaires** du sinogramme $p(\theta,s)=\sum_m p_m(s)\,e^{im\theta}$, dont les moments de la
+   section 4 sont un cas particulier.
 
 Conclusion défendable : *le SNN implémente un pas de diffusion de faisceau correct, mais sur
-des fibres qui ne sont pas celles pour lesquelles le faisceau est exact, et avec une portée
-limitée par la localité du graphe.* Les deux limites pointent vers la même perspective.
+des fibres qui ne sont pas celles pour lesquelles le faisceau est exact, avec une portée
+limitée par la localité du graphe, et avec un transport qui ne correspond pas au lien
+physique entre vues voisines.* Les deux premières limites pointent vers la perspective de la
+section 7, qui lève la portée. La troisième ne peut pas être levée par un transport fixé
+par la géométrie : seul le niveau des moments en admet un.
 
 ---
 
@@ -462,6 +539,12 @@ $\tilde E_k$ de la sortie.
   (hétérophilie, anti-oversmoothing via holonomie) : l'argument ici est **géométrique**
   (bon repère, bonnes harmoniques), pas topologique. Le seul ingrédient topologique réel est
   la torsion de Möbius.
+- Le RoPE angulaire lève la limite de **portée**, pas la limite **géométrique**. C'est la même
+  connexion plate (jauge pure) que celle du SNN, appliquée aux requêtes et aux clés, et il ne
+  représente pas davantage le décalage dépendant de la profondeur (section 6, point 5). Il ne
+  faut donc pas le présenter comme la réponse à la critique de la section 6 : l'argument pour
+  une attention de faisceau tient à la portée et au transport exact des moments bas-ordre,
+  pas à un meilleur modèle du lien entre vues.
 - En fan-beam à détecteur fixe, rien de tout cela ne s'applique sans rebinning : il n'existe
   pas d'action de $SO(2)$ reliant les vues, et les HLCC parallèles sont fausses.
 
@@ -490,12 +573,23 @@ ailleurs, un réseau à passage de messages local de profondeur $L$ sur un graph
 portée angulaire exactement égale à $L\cdot k/2$ vues, ce qui borne a priori la région du
 wedge qu'il peut informer. »
 
+**Limite géométrique.** « Entre deux vues voisines, un point de l'objet se déplace le long du
+détecteur d'une quantité proportionnelle à sa profondeur le long du rayon, que la vue ne
+mesure pas. Aucune application fixée par la géométrie n'envoie donc une vue sur sa voisine,
+et une rotation $SO(2)$ des canaux à position fixée sur le détecteur ne représente pas ce
+transport. Comme $R(\theta_i-\theta_j)=R(\theta_i)R(\theta_j)^\top$ est une jauge pure, la
+connexion du SNN est plate sur tout graphe ; par changement de jauge, le SNN équivaut à un
+GCN dont les poids sont modulés par l'angle absolu. La structure $SO(2)$ n'est exacte qu'au
+niveau des harmoniques angulaires du sinogramme, et donc des moments de Helgason-Ludwig :
+c'est à ce niveau que le faisceau est légitime. »
+
 **Perspective.** « Une attention de faisceau sur le graphe complet des vues lève la limite de
 portée. La connexion étant plate, elle se réduit à une attention rotative dont la position
 est l'angle d'acquisition et dont les fréquences sont entières ; ces fréquences sont
 précisément celles des conditions de Helgason-Ludwig, ce qui permet de transporter exactement
 les moments bas-ordre et d'imposer leur harmonicité par une projection ou une énergie de
-Dirichlet. »
+Dirichlet. La connexion restant plate, une telle attention ne lève pas la limite géométrique :
+les hautes fréquences du wedge restent l'affaire d'un a priori appris. »
 
 ---
 
@@ -516,6 +610,7 @@ Dirichlet. »
 | Holonomie | produit des transports le long d'un cycle |
 | Connexion plate | holonomie triviale ; équivalente par jauge au faisceau constant |
 | Jauge | choix d'un repère dans chaque fibre |
+| Jauge pure | transport de la forme $R_{uv}=g_ug_v^{-1}$ : plat sur tout graphe, cycles compris |
 
 ## 10. Références
 

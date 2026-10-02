@@ -5,20 +5,33 @@
 #   bash scripts/launch_optuna_8gpus.sh UNet2dHLCC
 #   bash scripts/launch_optuna_8gpus.sh GCN 12          # model, num_layers
 #   bash scripts/launch_optuna_8gpus.sh SNN 18 hlcc     # model, num_layers, physics (auto|none|hlcc)
+#   bash scripts/launch_optuna_8gpus.sh UNet2dHLCC 6 auto --physics-only   # extra flags are forwarded
+#   bash scripts/launch_optuna_8gpus.sh UNet2dHLCC 6 auto --physics-only --hlcc-max-order 3   # HLCC orders 0..3
+#   N_TRIALS_PER_GPU=4 bash scripts/launch_optuna_8gpus.sh GCN 12 auto --optimizer-only
+#
+# Every argument after the third one is forwarded verbatim to src_2D/optuna_search.py
+# (e.g. --physics-only, --optimizer-only, --lambda-range 1e-5 1e-2, --hlcc-max-order 3, --grad_checkpoint).
+# --physics-only / --optimizer-only studies get their own name (suffix "_physics_only" /
+# "_optimizer_only") so that they never mix with a full search; so do the studies with
+# --hlcc-max-order K != 1 (suffix "_K<K>").
+# N_TRIALS_PER_GPU (default 25) sets the number of trials of each of the 8 workers.
+# The six graph-model studies of the protocol, one after the other: scripts/launch_gnn_optuna_queue.sh
 #
 # Each worker only sees its own GPU through CUDA_VISIBLE_DEVICES (no --gpu-id: combining
 # both made 7 workers out of 8 crash on an invalid device index).
 
 set -euo pipefail
 
-MODEL="${1:?Usage: $0 <UNet2D|UNet2dHLCC|GCN|SNN> [num_layers] [physics]}"
+MODEL="${1:?Usage: $0 <UNet2D|UNet2dHLCC|GCN|SNN> [num_layers] [physics] [extra optuna_search.py flags...]}"
 NUM_LAYERS="${2:-6}"
 PHYSICS="${3:-auto}"
+shift $(( $# < 3 ? $# : 3 ))
+EXTRA_ARGS="$*"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
 N_GPUS=8
-N_TRIALS_PER_GPU=25
+N_TRIALS_PER_GPU="${N_TRIALS_PER_GPU:-25}"
 N_EPOCHS=30
 N_SAMPLES=500
 N_VAL=100
@@ -30,6 +43,15 @@ case "$MODEL" in
 esac
 STUDY_NAME="${RUN_NAME}_parallel"
 [ "$PHYSICS" != "auto" ] && STUDY_NAME="${STUDY_NAME}_${PHYSICS}"
+for ARG in "$@"; do
+    [ "$ARG" = "--physics-only" ] && STUDY_NAME="${STUDY_NAME}_physics_only"
+    [ "$ARG" = "--optimizer-only" ] && STUDY_NAME="${STUDY_NAME}_optimizer_only"
+done
+PREVIOUS=""
+for ARG in "$@"; do
+    [ "$PREVIOUS" = "--hlcc-max-order" ] && [ "$ARG" != "1" ] && STUDY_NAME="${STUDY_NAME}_K${ARG}"
+    PREVIOUS="$ARG"
+done
 SESSION_NAME="optuna_${STUDY_NAME}"
 DB_PATH="$PROJECT_ROOT/db/optuna_${STUDY_NAME}.db"
 
@@ -53,7 +75,7 @@ PY
 
 CMD="$PYTHON_BIN src_2D/optuna_search.py --model $MODEL --num_layers $NUM_LAYERS --physics $PHYSICS \
 --n-trials $N_TRIALS_PER_GPU --n-epochs $N_EPOCHS --n-samples $N_SAMPLES --n-val $N_VAL --batch-size $BATCH_SIZE \
---study-name $STUDY_NAME --storage sqlite:///$DB_PATH --use-wandb"
+--study-name $STUDY_NAME --storage sqlite:///$DB_PATH --use-wandb $EXTRA_ARGS"
 
 tmux new-session -d -s "$SESSION_NAME" -n "GPU_0" "cd $PROJECT_ROOT && CUDA_VISIBLE_DEVICES=0 $CMD; read"
 for GPU_ID in $(seq 1 $((N_GPUS - 1))); do

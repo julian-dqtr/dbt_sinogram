@@ -24,7 +24,7 @@ from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.models.GLM.glm_graph_data import create_glm_sinogram_data
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
 from src_2D.models.GLM.glm_model import GLMNet
-from src_2D.utils.evaluation import get_soft_acquired_mask
+from src_2D.utils.evaluation import get_data_consistency_mask
 from src_2D.utils.metrics import ssim
 
 
@@ -140,7 +140,7 @@ def objective(trial, args):
         scheduler = CosineAnnealingLR(optimizer, T_max=args.n_epochs, eta_min=lr * 0.01)
         loss_fn = AnnealedLoss(geom, lambda_m0=lambda_m0, lambda_m1=lambda_m1, anneal_epochs=anneal_epochs).to(device)
 
-        soft_mask = get_soft_acquired_mask(geom, device).squeeze(1)  # [1, num_views, 1]
+        soft_mask = get_data_consistency_mask(geom, device, blend_width_deg=5.0).squeeze(1)  # [1, num_views, 1]
 
         # Calibrate physics loss
         calibrate_loss(loss_fn, train_loader, geom, device)
