@@ -10,21 +10,31 @@ from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 
 
-def get_soft_acquired_mask(geom: DBTGeometry, device: torch.device, blend_width_deg: float = 5.0) -> torch.Tensor:
+def get_data_consistency_mask(geom: DBTGeometry, device: torch.device, blend_width_deg: float = 0.0) -> torch.Tensor:
     """
-    Soft Data Consistency (DC) mask, shape [1, 1, num_views, 1] for broadcasting.
+    Data Consistency (DC) mask, shape [1, 1, num_views, 1] for broadcasting.
 
-    The mask is used as ``out = mask * measured + (1 - mask) * predicted``. Since the
-    measured sinogram is ZERO outside the acquired window, the mask must be exactly 0 on
-    every missing view, otherwise the prediction would be blended with zeros (i.e.
+    The mask is used as ``out = mask * measured + (1 - mask) * predicted``.
+
+    HARD data consistency (default, ``blend_width_deg = 0``): 1.0 on every acquired view and 0.0 on
+    every missing view, so that the measurements come out of every model bit for bit.
+
+    A positive ``blend_width_deg`` gives the SOFT mask of the runs trained before 2026-09-30, kept to
+    reproduce them. Since the measured sinogram is ZERO outside the acquired window, the mask must
+    be exactly 0 on every missing view, otherwise the prediction would be blended with zeros (i.e.
     attenuated). The cosine taper therefore lives INSIDE the acquired window:
 
     - 0.0 on every missing view,
     - rises smoothly over ``blend_width_deg`` degrees starting from the first missing view,
     - 1.0 in the core of the acquired window.
 
-    Every acquired view keeps a strictly positive weight, and the defining invariant is
-    ``DC(ground_truth) == ground_truth`` (checked in tests/test_dc_mask.py).
+    It was abandoned because a network trained behind the DC step never learns to reproduce the
+    acquired views: with a 5 degree taper, the 4 border views of each side of the window came out
+    15 to 19 times less accurate (MSE against the clean target) than the measurements they replaced,
+    and the hard mask does not enlarge the jump at the border of the window (docs/hlcc_projection.md).
+
+    In both cases the defining invariant is ``DC(ground_truth) == ground_truth`` (checked in
+    tests/test_dc_mask.py), and the missing views are never touched.
     """
     angles_deg = np.rad2deg(np.asarray(geom.angles, dtype=np.float64))
     acquired = np.asarray(geom.acquired_view_mask, dtype=bool)
@@ -50,9 +60,9 @@ def get_soft_acquired_mask(geom: DBTGeometry, device: torch.device, blend_width_
     return mask_tensor.view(1, 1, geom.num_views, 1)
 
 
-def apply_data_consistency(measured: torch.Tensor, predicted: torch.Tensor, soft_mask: torch.Tensor) -> torch.Tensor:
-    """Blend the measured views back into a predicted sinogram (see get_soft_acquired_mask)."""
-    return soft_mask * measured + (1.0 - soft_mask) * predicted
+def apply_data_consistency(measured: torch.Tensor, predicted: torch.Tensor, dc_mask: torch.Tensor) -> torch.Tensor:
+    """Put the measured views back into a predicted sinogram (see get_data_consistency_mask)."""
+    return dc_mask * measured + (1.0 - dc_mask) * predicted
 
 
 def build_full_astra_geometries(geometry_config: DBTGeometryConfig, image_shape: Tuple[int, int]):

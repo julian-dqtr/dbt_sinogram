@@ -16,13 +16,13 @@ def test_forward_shape_and_data_consistency(name, config, geom, clean_val_batch,
         out = model(incomplete)
     assert out.shape == incomplete.shape and torch.isfinite(out).all()
 
-    # The core of the acquired window is copied from the measurements, bit for bit.
-    core = (model.soft_mask.flatten() == 1.0)
-    assert core.sum() == 43
-    assert torch.equal(out[:, :, core], incomplete[:, :, core])
+    # Hard data consistency: every acquired view is copied from the measurements, bit for bit.
+    acquired = (model.dc_mask.flatten() == 1.0)
+    assert acquired.sum() == 51 and torch.equal(acquired.cpu(), torch.from_numpy(geom.acquired_view_mask))
+    assert torch.equal(out[:, :, acquired], incomplete[:, :, acquired])
     # Without DC the network output differs there: the option really is wired.
     with torch.no_grad():
-        assert not torch.equal(model(incomplete, apply_dc=False)[:, :, core], incomplete[:, :, core])
+        assert not torch.equal(model(incomplete, apply_dc=False)[:, :, acquired], incomplete[:, :, acquired])
 
 
 def test_both_unets_are_the_same_network(config):
@@ -31,13 +31,13 @@ def test_both_unets_are_the_same_network(config):
     assert [(k, v.shape) for k, v in a.state_dict().items()] == [(k, v.shape) for k, v in b.state_dict().items()]
 
 
-@pytest.mark.parametrize("name,physics", [("UNet2D", False), ("UNet2dHLCC", True)])
-def test_a_few_training_steps_reduce_the_loss(name, physics, config, geom, clean_val_batch, device):
+@pytest.mark.parametrize("name,physics,max_order", [("UNet2D", False, 1), ("UNet2dHLCC", True, 1), ("UNet2dHLCC", True, 3)])
+def test_a_few_training_steps_reduce_the_loss(name, physics, max_order, config, geom, clean_val_batch, device):
     torch.manual_seed(0)
     incomplete, full = clean_val_batch[0][:4].to(device), clean_val_batch[1][:4].to(device)
     model, _ = build_model(name, config, filters=8)
     model = model.to(device).train()
-    loss_fn = AnnealedLoss(geom, lambda_m0=0.1, lambda_m1=0.1, anneal_epochs=0).to(device)
+    loss_fn = AnnealedLoss(geom, lambda_m0=0.1, lambda_m1=0.1, anneal_epochs=0, lambda_high=0.1, max_order=max_order).to(device)
     loss_fn.calibrate(incomplete[:, 0])
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
@@ -45,8 +45,9 @@ def test_a_few_training_steps_reduce_the_loss(name, physics, config, geom, clean
     for _ in range(8):
         pred = model(incomplete)
         if physics:
-            loss, mse, m0, m1 = loss_fn(pred[:, 0], full[:, 0], current_epoch=1)
-            assert all(torch.isfinite(t) for t in (mse, m0, m1))
+            loss, mse, physics_losses = loss_fn(pred[:, 0], full[:, 0], current_epoch=1)
+            assert physics_losses.shape == (max_order + 1,)
+            assert torch.isfinite(mse) and torch.isfinite(physics_losses).all()
         else:
             loss = torch.nn.functional.mse_loss(pred, full)
         optimizer.zero_grad()

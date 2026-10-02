@@ -1,15 +1,28 @@
 """Unified Optuna search, built on the exact training loop of src_2D/train.py.
 
     python src_2D/optuna_search.py --model UNet2dHLCC --n-trials 50
+    python src_2D/optuna_search.py --model UNet2dHLCC --physics-only --n-trials 50
     python src_2D/optuna_search.py --model SNN --num_layers 12 --n-trials 50
+    python src_2D/optuna_search.py --model GCN --num_layers 12 --optimizer-only --n-trials 4
 
 One worker = one GPU: launch several workers on the same study with
-``CUDA_VISIBLE_DEVICES=<i>`` (see scripts/launch_optuna_8gpus.sh).
+``CUDA_VISIBLE_DEVICES=<i>`` (see scripts/launch_optuna_8gpus.sh, and
+scripts/launch_gnn_optuna_queue.sh for the six studies of the graph models).
 
 - Objective: validation MSE on the missing wedge at the best epoch (minimised), i.e. the same
   quantity that selects checkpoints in train.py.
 - For the graph models, the ablation variables (num_layers, k, graph_type) are NOT searched:
   they are fixed by the CLI so that every depth gets its own study.
+- ``--physics-only`` searches the HLCC terms alone (lambda_m0, lambda_m1, anneal_epochs, plus
+  lambda_high when ``--hlcc-max-order`` is 2 or more) on top of the default backbone of train.py
+  (the configuration of the UNet2D reference run): a clean ablation of the physics term that does
+  not also re-tune the U-Net. Studies with ``--hlcc-max-order`` != 1 get the suffix ``_K<order>``.
+- ``--optimizer-only`` searches lr and weight_decay alone. Everything else keeps its train.py
+  default; for the graph models this fixes the topology (k = 12, sigma_deg = 5) and the width
+  (num_stalks = 32), so that GCN and SNN share the same graph and the same parameter count at
+  every depth and only the transport differs.
+- Each trial records its full model configuration (user attribute "model_config"), so that
+  scripts/launch_best_training.py rebuilds exactly the architecture that Optuna evaluated.
 - Trials never write model checkpoints, so a search can never overwrite a trained model.
 - ``best_params.json`` is rewritten after EVERY completed trial (a killed worker loses nothing).
 """
@@ -40,6 +53,20 @@ def parse_args():
     parser.add_argument("--n-val", type=int, default=100, help="Validation samples per trial")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--physics", type=str, default="auto", choices=["auto", "none", "hlcc"])
+    search = parser.add_mutually_exclusive_group()
+    search.add_argument("--physics-only", action="store_true",
+                        help="Only search the HLCC terms; keep the train.py defaults for everything else")
+    search.add_argument("--optimizer-only", action="store_true",
+                        help="Only search lr and weight_decay; keep the train.py defaults for everything else "
+                             "(graph models: same topology and parameter count for GCN and SNN)")
+    # The HLCC terms are normalised to ~1 on zero-filling while the MSE is ~2e-2 there, so
+    # lambda = 1e-2 already gives the physics term about half the weight of the data term. In terms of
+    # gradients (measured on the U-Net): the physics / MSE ratio is ~26 to 52 at lambda = 0.1 and is
+    # proportional to lambda, i.e. ~3 at 1e-2 and ~0.003 at 1e-5.
+    parser.add_argument("--lambda-range", type=float, nargs=2, default=(1e-5, 1e-2), metavar=("LOW", "HIGH"),
+                        help="Log-uniform search range of lambda_m0, lambda_m1 and lambda_high")
+    parser.add_argument("--hlcc-max-order", type=int, default=1,
+                        help="Highest HLCC order of the physics loss (fixed, never searched). 1: orders 0 and 1")
     # Ablation variables of the graph models: fixed, never searched.
     parser.add_argument("--num_layers", type=int, default=6)
     parser.add_argument("--k", type=int, default=12)
@@ -47,7 +74,10 @@ def parse_args():
     parser.add_argument("--grad_checkpoint", action="store_true")
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--storage", type=str, default=None, help="Defaults to sqlite:///db/optuna_<study>.db")
-    parser.add_argument("--study-name", type=str, default=None, help="Defaults to <run_name>_parallel")
+    parser.add_argument("--study-name", type=str, default=None,
+                        help="Defaults to <run_name>_parallel, plus _physics_only / _optimizer_only in these modes")
+    parser.add_argument("--create-only", action="store_true",
+                        help="Create the study (if needed) and exit: run it once before starting parallel workers")
     return parser.parse_args()
 
 
@@ -57,22 +87,32 @@ def make_train_args(args, trial: optuna.Trial):
         "--model", args.model, "--epochs", str(args.n_epochs), "--n_samples", str(args.n_samples),
         "--n_val", str(args.n_val), "--batch_size", str(args.batch_size), "--physics", args.physics,
         "--num_layers", str(args.num_layers), "--k", str(args.k), "--graph_type", args.graph_type,
+        "--hlcc_max_order", str(args.hlcc_max_order),
     ]
     train_args = build_train_parser().parse_args(argv)
     train_args.grad_checkpoint = args.grad_checkpoint
     train_args.use_wandb = args.use_wandb
     train_args.wandb_project = "dbt-sinogram-optuna-2d"
 
-    train_args.lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    train_args.weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
-    if args.model in GRAPH_MODELS:
-        train_args.num_stalks = trial.suggest_categorical("num_stalks", [16, 32, 64])
-        train_args.sigma_deg = trial.suggest_categorical("sigma_deg", [2.0, 3.5, 5.0, 10.0])
-    else:
-        train_args.filters = trial.suggest_categorical("filters", [16, 32, 64])
-    if uses_physics(train_args):
-        train_args.lambda_m0 = trial.suggest_float("lambda_m0", 1e-3, 1.0, log=True)
-        train_args.lambda_m1 = trial.suggest_float("lambda_m1", 1e-3, 1.0, log=True)
+    physics = uses_physics(train_args)
+    if args.physics_only and not physics:
+        raise ValueError(f"--physics-only needs the HLCC loss, which is off for --model {args.model} --physics {args.physics}.")
+
+    if not args.physics_only:
+        train_args.lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
+        train_args.weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+    if not (args.physics_only or args.optimizer_only):
+        if args.model in GRAPH_MODELS:
+            train_args.num_stalks = trial.suggest_categorical("num_stalks", [16, 32, 64])
+            train_args.sigma_deg = trial.suggest_categorical("sigma_deg", [2.0, 3.5, 5.0, 10.0])
+        else:
+            train_args.filters = trial.suggest_categorical("filters", [16, 32, 64])
+    if physics and not args.optimizer_only:
+        low, high = args.lambda_range
+        train_args.lambda_m0 = trial.suggest_float("lambda_m0", low, high, log=True)
+        train_args.lambda_m1 = trial.suggest_float("lambda_m1", low, high, log=True)
+        if args.hlcc_max_order >= 2:
+            train_args.lambda_high = trial.suggest_float("lambda_high", low, high, log=True)
         train_args.anneal_epochs = trial.suggest_int("anneal_epochs", 2, max(3, args.n_epochs // 2))
 
     train_args.run_name = f"{args.study_name}_trial{trial.number}"
@@ -96,7 +136,9 @@ def main():
     base_config = model_config_from_args(build_train_parser().parse_args(
         ["--model", args.model, "--num_layers", str(args.num_layers), "--k", str(args.k)]))
     run_name = default_run_name(args.model, base_config)
-    args.study_name = args.study_name or f"{run_name}_parallel"
+    mode_suffix = "_physics_only" if args.physics_only else "_optimizer_only" if args.optimizer_only else ""
+    order_suffix = f"_K{args.hlcc_max_order}" if args.hlcc_max_order != 1 else ""
+    args.study_name = args.study_name or f"{run_name}_parallel{mode_suffix}{order_suffix}"
     args.storage = args.storage or f"sqlite:///{PROJECT_ROOT / 'db' / f'optuna_{args.study_name}.db'}"
     best_params_path = PROJECT_ROOT / "outputs/2d/optuna" / args.study_name / "best_params.json"
 
@@ -106,9 +148,14 @@ def main():
         direction="minimize", study_name=args.study_name, storage=storage, load_if_exists=True,
         pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=5),
     )
+    if args.create_only:
+        print(f"Optuna study '{args.study_name}' ready ({args.storage})")
+        return
 
     def objective(trial: optuna.Trial) -> float:
-        best = run_training(make_train_args(args, trial), trial=trial, save=False)
+        train_args = make_train_args(args, trial)
+        trial.set_user_attr("model_config", model_config_from_args(train_args))
+        best = run_training(train_args, trial=trial, save=False)
         for key, value in best.items():
             trial.set_user_attr(key, value)
         return best[SELECTION_METRIC]
@@ -123,7 +170,9 @@ def main():
             "model": args.model, "study_name": args.study_name, f"best_{SELECTION_METRIC}": best.value,
             "trial_number": best.number, "user_attrs": best.user_attrs, "params": best.params,
             "fixed": {"num_layers": args.num_layers, "k": args.k, "graph_type": args.graph_type,
-                      "physics": args.physics, "batch_size": args.batch_size},
+                      "physics": args.physics, "batch_size": args.batch_size, "hlcc_max_order": args.hlcc_max_order,
+                      "physics_only": args.physics_only, "optimizer_only": args.optimizer_only,
+                      "lambda_range": list(args.lambda_range)},
         }, indent=2))
 
     print(f"Optuna study '{args.study_name}' ({args.storage})")

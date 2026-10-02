@@ -9,7 +9,7 @@ from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.models.SinoSheavesNN.graph_data import angular_reach_deg, build_transport_operators
 from src_2D.models.SinoSheavesNN.snn_layers import ViewGraphBlock, ViewNorm, detector_conv
-from src_2D.utils.evaluation import apply_data_consistency, get_soft_acquired_mask
+from src_2D.utils.evaluation import apply_data_consistency, get_data_consistency_mask
 
 
 class ViewGraphNet(nn.Module):
@@ -17,7 +17,7 @@ class ViewGraphNet(nn.Module):
     Graph network for sinogram completion. Nodes are the views, node features keep the
     detector axis: [B, 2 * num_stalks, V, D].
 
-    The graph (topology, edge weights, restriction maps) and the soft data-consistency step
+    The graph (topology, edge weights, restriction maps) and the data-consistency step
     live INSIDE the model, so training, validation and evaluation cannot diverge:
 
         completed = model(incomplete)          # [B, 1, V, D] -> [B, 1, V, D]
@@ -35,7 +35,8 @@ class ViewGraphNet(nn.Module):
             models reach 36 / 72 / 108 degrees, while the farthest missing view is 65
             degrees away from the acquired window.
         k, sigma_deg, graph_type, normalization: see ``graph_data.build_adjacency``.
-        data_consistency: blend the measured views back into the output.
+        data_consistency: copy the measured views back into the output (hard data consistency).
+        blend_width_deg: > 0 restores the soft taper of the first runs (see ``get_data_consistency_mask``).
         grad_checkpoint: trade compute for memory in deep / wide models.
     """
 
@@ -43,7 +44,7 @@ class ViewGraphNet(nn.Module):
     # ``a_sin`` is None for the identity transport (plain GCN aggregation).
     a_cos: torch.Tensor
     a_sin: Optional[torch.Tensor]
-    soft_mask: torch.Tensor
+    dc_mask: torch.Tensor
     acquired_flag: torch.Tensor
 
     def __init__(
@@ -56,7 +57,7 @@ class ViewGraphNet(nn.Module):
         graph_type: str = "knn",
         normalization: str = "sym",
         data_consistency: bool = True,
-        blend_width_deg: float = 5.0,
+        blend_width_deg: float = 0.0,
         grad_checkpoint: bool = False,
         geometry_config: Optional[DBTGeometryConfig] = None,
     ):
@@ -79,7 +80,7 @@ class ViewGraphNet(nn.Module):
         self.register_buffer("a_cos", a_cos, persistent=False)
         self.register_buffer("a_sin", a_sin, persistent=False)
         self.register_buffer(
-            "soft_mask", get_soft_acquired_mask(geom, torch.device("cpu"), blend_width_deg), persistent=False
+            "dc_mask", get_data_consistency_mask(geom, torch.device("cpu"), blend_width_deg), persistent=False
         )
         acquired = torch.from_numpy(geom.acquired_view_mask).float().view(1, 1, -1, 1)
         self.register_buffer("acquired_flag", acquired, persistent=False)
@@ -122,7 +123,7 @@ class ViewGraphNet(nn.Module):
 
         use_dc = self.data_consistency if apply_dc is None else apply_dc
         if use_dc:
-            out = apply_data_consistency(incomplete, out, self.soft_mask)
+            out = apply_data_consistency(incomplete, out, self.dc_mask)
         return out
 
 

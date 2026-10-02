@@ -5,8 +5,8 @@ degrees) with four learned models sharing ONE protocol:
 
 | Name | Model | Loss |
 |---|---|---|
-| `UNet2D` | U-Net (residual, soft data consistency) | MSE |
-| `UNet2dHLCC` | the same network | MSE + annealed Helgason-Ludwig (HLCC) penalty |
+| `UNet2D` | U-Net (residual, hard data consistency) | MSE |
+| `UNet2dHLCC` | the same network | MSE + annealed Helgason-Ludwig (HLCC) penalty, orders 0-1 (`--hlcc_max_order 3`: orders 0-3) |
 | `GCN` | view-graph GCN, kNN k = 12, no rotation | MSE (`--physics hlcc` optional) |
 | `SNN` | SinoSheavesNN: same graph and parameters, hard-coded SO(2) maps R(delta theta) | idem |
 
@@ -30,9 +30,30 @@ degrees away from the acquired window.
 bash scripts/launch_optuna_8gpus.sh SNN 12
 .venv/bin/python scripts/launch_best_training.py SNN_L12_parallel            # prints the command (--run to start it)
 
-# Evaluation on the immutable test split (+ per-view error profile)
+# Graph models (docs/plan_experiences_gnn.md): the six lr / weight_decay studies, one after the other
+bash scripts/launch_gnn_optuna_queue.sh
+.venv/bin/python scripts/launch_best_training.py GCN_L6_parallel_optimizer_only --run
+
+# Evaluation on the immutable test split (+ per-view error profile and inter-sample variance)
 .venv/bin/python src_2D/evaluate_all.py
+
+# U-Net vs U-Net + HLCC with few (200) and many (2000) training phantoms, one run after the other,
+# then the paired comparison on the test split (tables + figures)
+bash scripts/launch_unet_hlcc_data_study.sh
+.venv/bin/python src_2D/evaluate_all.py --models $(.venv/bin/python scripts/data_study_report.py --print_models)
+.venv/bin/python scripts/data_study_report.py
+
+# Data consistency: the acquired views of the outputs minus the measured ones (must print exactly 0)
+.venv/bin/python scripts/check_data_consistency.py --models UNet2D UNet2dHLCC
+
+# HLCC moment regression (Huang et al. 2017): why it stops at order 4 (figure + table, inference only)
+.venv/bin/python scripts/hlcc_order_study.py
 ```
+
+Model names accept suffixes (`src_2D/models/factory.py`): `GCN_L12` (depth), `UNet2D_N200`
+(the run saved under that name with `train.py --run_name`), and `UNet2D_P4` (the
+model followed by the HLCC moment regression of orders 0..4 on the missing views, no training;
+`UNet2D_P3` stops at order 3).
 
 ## Protocol (what every number in the thesis relies on)
 
@@ -42,12 +63,18 @@ bash scripts/launch_optuna_8gpus.sh SNN 12
 - **Data**: phantoms generated on the fly from per-sample seeds. `train`, `val` and `test`
   are fixed, disjoint and independent of the global RNG. Inputs are noisy (Poisson), targets
   are clean.
-- **Data consistency**: soft mask tapered INSIDE the acquired window, identical for all
-  learned models, applied inside `model(incomplete)`.
+- **Data consistency**: hard, identical for all learned models, applied inside
+  `model(incomplete)`: every acquired view comes out bit for bit, the missing views are never
+  touched. (The runs trained before 2026-09-30 used a soft mask tapered inside the window; it made
+  the 8 border views 15 to 19 times less accurate than the measurements, see `docs/hlcc_projection.md`.)
+- **HLCC**: `src_2D/utils/hlcc.py`. Penalty of orders 0..`--hlcc_max_order` in the loss of
+  `UNet2dHLCC` (default weights 1e-3), residuals `hlcc_residual_<n>` in the evaluation, and the
+  optional moment regression `_P4` as a post-processing.
 - **Metrics**: `src_2D/utils/metrics.py`, fixed `data_range = 1.0`, reported on the whole
   sinogram and on the missing wedge. Checkpoints are selected on the validation wedge MSE.
 - **Checkpoints** are self-describing (architecture + geometry + metrics + git commit);
   `src_2D/models/factory.get_model` loads them strictly and raises on any mismatch.
 
-Theory notes: `docs/harmonic_sheaves.md` (numbers reproduced by `scripts/verify_harmonic_sheaves.py`).
-`src_2D/models/GLM` and `src_2D/models/Unet2dRNO` are legacy fan-beam experiments outside this protocol.
+Theory notes: `docs/harmonic_sheaves.md` (numbers reproduced by `scripts/verify_harmonic_sheaves.py`)
+and `docs/hlcc_projection.md` (HLCC loss, moment regression, hard data consistency, data regimes).
+`src_2D/models/GLM` is a legacy fan-beam experiment outside this protocol.

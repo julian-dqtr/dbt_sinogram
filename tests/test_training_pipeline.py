@@ -1,4 +1,6 @@
 """End-to-end smoke test: train (1 tiny epoch) -> save -> factory load -> same predictions."""
+import json
+
 import pytest
 import torch
 
@@ -11,6 +13,7 @@ from src_2D.train import build_parser, run_training
     ["--model", "UNet2dHLCC", "--filters", "8"],
     ["--model", "GCN", "--num_layers", "2", "--num_stalks", "4"],
     ["--model", "SNN", "--num_layers", "2", "--num_stalks", "4", "--physics", "hlcc"],
+    ["--model", "UNet2dHLCC", "--filters", "8", "--hlcc_max_order", "3", "--train_repeats", "2"],
 ])
 def test_train_save_reload(model_args, tmp_path, device):
     if device.type != "cuda":
@@ -24,6 +27,9 @@ def test_train_save_reload(model_args, tmp_path, device):
 
     for artefact in ("best_model.pt", "training_stats.json", "history.json"):
         assert (tmp_path / "ckpt" / artefact).exists()
+    # One logged HLCC term per order of the physics loss (orders 0 and 1 unless --hlcc_max_order says otherwise).
+    logged = json.loads((tmp_path / "ckpt" / "history.json").read_text())[0]
+    assert {key for key in logged if key.startswith("train/hlcc_m")} == {f"train/hlcc_m{n}" for n in range(args.hlcc_max_order + 1)}
     model, is_nn = get_model(args.model, device, checkpoint_path=tmp_path / "ckpt" / "best_model.pt")
     assert is_nn
     with torch.no_grad():

@@ -3,52 +3,50 @@ import math
 import torch
 import torch.nn as nn
 
+from src_2D.utils.hlcc import moment_operator, residual_projectors
+
 
 class HelgasonLudwigLoss(nn.Module):
     """
-    Computes the 0th and 1st Helgason-Ludwig moment consistency losses for a sinogram.
+    Helgason-Ludwig consistency penalty of orders 0..``max_order`` for a PARALLEL-BEAM sinogram.
 
-    The HLCC state that, for a PARALLEL-BEAM sinogram p(θ, s) = Rf(θ, s):
-    - 0th moment M(θ) = Σ_s p(s,θ)·ds should be *constant* across all views (total mass).
-    - 1st moment C(θ) = Σ_s s·p(s,θ)·ds should vary sinusoidally as A·cos(θ) + B·sin(θ)
-      (mass times the projection of the centre of mass on the detector axis).
+    The moment curve of order n (Chebyshev form, see ``src_2D/utils/hlcc.py``) is
 
-    These conditions are only valid for parallel-beam data: tests/test_physics_loss.py
-    checks that the ground truth of the configured geometry satisfies them.
+        a_n(θ) = Σ_s p(θ, s) · U_n(s / S) · ds / S
+
+    and the HLCC state that a_n lies in H_n = span{cos(mθ), sin(mθ) : m ≤ n, m ≡ n mod 2}. The raw
+    loss of order n is the mean squared part of a_n OUTSIDE H_n, L_n = ‖(I − P_n) a_n‖² / V:
+
+    - order 0: a_0 · S is the total mass, which must be *constant* across the views, so L_0 is the
+      (population) variance of a_0 over the views;
+    - order 1: a_1 · S² / 2 is the first moment (mass times the projection of the centre of mass on
+      the detector axis), which must vary as A·cos(θ) + B·sin(θ);
+    - orders 2 and 3: second and third moments, angular frequencies {0, 2} and {1, 3}.
+
+    ``max_order = 1`` is the loss used by the first UNet2dHLCC runs (up to constant factors that the
+    calibration removes). These conditions are only valid for parallel-beam data:
+    tests/test_physics_loss.py checks that the ground truth of the configured geometry satisfies them.
 
     Input sinogram shape: [num_views, num_detectors] or [B, num_views, num_detectors].
     """
 
     # Buffers registered in __init__, declared here so static checkers know their type.
-    s_positions: torch.Tensor
-    I_minus_P: torch.Tensor
-    scale_m0: torch.Tensor
-    scale_m1: torch.Tensor
+    moment_op: torch.Tensor
+    residual_projectors: torch.Tensor
+    scales: torch.Tensor
 
-    def __init__(self, geom):
+    def __init__(self, geom, max_order: int = 1):
         super().__init__()
+        if max_order < 0:
+            raise ValueError(f"max_order must be >= 0, got {max_order}")
+        self.max_order = max_order
         self.num_views = geom.num_views
-        self.num_det = geom.det_col_count
-        self.ds = geom.det_pixel_size
+        self.half_width = geom.det_col_count * geom.det_pixel_size / 2.0  # S
 
-        # Detector positions s_d = (d - num_det/2 + 0.5) * ds
-        d_idx = torch.arange(self.num_det, dtype=torch.float32)
-        s_positions = (d_idx - self.num_det / 2.0 + 0.5) * self.ds
-        self.register_buffer("s_positions", s_positions)
-
-        # Pre-compute (I - P) for the 1st moment, where P is the projection onto
-        # the span of [cos(θ), sin(θ)]. Residual (I-P)·C(θ) = 0 iff C(θ) is sinusoidal.
-        angles = torch.tensor(geom.angles, dtype=torch.float32)
-        cos_t = torch.cos(angles).unsqueeze(1)
-        sin_t = torch.sin(angles).unsqueeze(1)
-        Phi = torch.cat([cos_t, sin_t], dim=1)  # [V, 2]
-        Phi_T_Phi_inv = torch.linalg.inv(Phi.t() @ Phi)
-        P = Phi @ Phi_T_Phi_inv @ Phi.t()       # [V, V]
-        self.register_buffer("I_minus_P", torch.eye(self.num_views) - P)
-
-        # Scale constants for normalisation (updated by calibrate())
-        self.register_buffer("scale_m0", torch.ones(1))
-        self.register_buffer("scale_m1", torch.ones(1))
+        self.register_buffer("moment_op", moment_operator(geom, max_order).float())                  # [D, K+1]
+        self.register_buffer("residual_projectors", residual_projectors(geom.angles, max_order).float())  # [K+1, V, V]
+        # Scale constants of the normalisation, one per order (updated by calibrate())
+        self.register_buffer("scales", torch.ones(max_order + 1))
 
     # ------------------------------------------------------------------
     # Calibration: call this on the first few batches to set the scales
@@ -63,35 +61,36 @@ class HelgasonLudwigLoss(nn.Module):
         as "fraction of the inconsistency of the naive input" (1.0 for zero-filling, ~0 for
         the ground truth). Never calibrate on the ground truth, whose loss is ~0.
         """
-        m0, m1 = self._raw_losses(sinogram)
-        self.scale_m0.copy_(torch.clamp(m0.detach(), min=1e-8).reshape(1))
-        self.scale_m1.copy_(torch.clamp(m1.detach(), min=1e-8).reshape(1))
+        self.scales.copy_(torch.clamp(self.raw_losses(sinogram).detach(), min=1e-12))
 
     # ------------------------------------------------------------------
-    def moments(self, sinogram: torch.Tensor):
-        """Return the discretised moments (M0 [B, V], M1 [B, V]) of a sinogram."""
+    def moments(self, sinogram: torch.Tensor) -> torch.Tensor:
+        """Moment curves a_0..a_K of a sinogram: [B, V, K+1] (a [V, D] input counts as B = 1)."""
         if sinogram.dim() == 2:
             sinogram = sinogram.unsqueeze(0)  # [1, V, D]
-        M_theta = sinogram.sum(dim=2) * self.ds            # [B, V]
-        C_theta = (sinogram @ self.s_positions) * self.ds  # [B, V]
-        return M_theta, C_theta
+        return sinogram @ self.moment_op
 
-    def _raw_losses(self, sinogram: torch.Tensor):
-        M_theta, C_theta = self.moments(sinogram)
+    def _residuals(self, sinogram: torch.Tensor) -> torch.Tensor:
+        """Part of every moment curve outside its harmonic space: [B, K+1, V]."""
+        return torch.einsum("nuv,bvn->bnu", self.residual_projectors, self.moments(sinogram))
 
-        # 0th moment: should be constant over views
-        loss_m0 = torch.var(M_theta, dim=1).mean()
+    def raw_losses(self, sinogram: torch.Tensor) -> torch.Tensor:
+        """Un-normalised loss of every order, averaged over the batch: [K+1]."""
+        return (self._residuals(sinogram) ** 2).mean(dim=(0, 2))
 
-        # 1st moment: should lie in span{cos,sin}
-        residual = C_theta @ self.I_minus_P.t()            # [B, V]
-        loss_m1 = (residual ** 2).sum(dim=1).mean() / self.num_views
+    @torch.no_grad()
+    def relative_residuals(self, sinogram: torch.Tensor) -> torch.Tensor:
+        """‖(I − P_n) a_n‖² / ‖a_n‖² per sample and order, [B, K+1]: a scale-free consistency metric
+        (0 for a consistent sinogram). Computed in float64: the ground truth is ~1e-6."""
+        if sinogram.dim() == 2:
+            sinogram = sinogram.unsqueeze(0)
+        moments = sinogram.double() @ self.moment_op.double()                       # [B, V, K+1]
+        residuals = torch.einsum("nuv,bvn->bnu", self.residual_projectors.double(), moments)
+        return (residuals**2).sum(dim=2) / (moments**2).sum(dim=1).clamp_min(1e-30)
 
-        return loss_m0, loss_m1
-
-    def forward(self, sinogram: torch.Tensor):
-        loss_m0, loss_m1 = self._raw_losses(sinogram)
-        # Normalised so each component is ~O(1) relative to the calibrated reference
-        return loss_m0 / self.scale_m0, loss_m1 / self.scale_m1
+    def forward(self, sinogram: torch.Tensor) -> torch.Tensor:
+        # Normalised so each order is ~O(1) relative to the calibrated reference
+        return self.raw_losses(sinogram) / self.scales
 
 
 class AnnealedLoss(nn.Module):
@@ -99,23 +98,38 @@ class AnnealedLoss(nn.Module):
     Combines MSE data-fidelity loss with normalised HLCC physics losses.
 
     Schedule:
-        total = MSE  +  alpha(epoch) * (λ_m0 * L_m0_norm + λ_m1 * L_m1_norm)
+        total = MSE  +  alpha(epoch) * Σ_n λ_n * L_n_norm          (n = 0..max_order)
 
     where alpha ramps from 0 → 1 over `anneal_epochs` using a cosine warm-up,
     giving the network time to learn the basic reconstruction before physics
-    constraints are introduced.
+    constraints are introduced. λ_0 = ``lambda_m0``, λ_1 = ``lambda_m1`` and every order n ≥ 2
+    shares ``lambda_high``.
 
-    The physics losses are *normalised* at calibration time so they naturally
-    sit at the same scale as the MSE, making λ_m0 and λ_m1 true relative weights
-    rather than order-of-magnitude tuning knobs.
+    The λ are NOT relative weights with respect to the MSE. Only the physics
+    losses are normalised, by their value on the zero-filled input (see
+    ``HelgasonLudwigLoss.calibrate``): each L_norm is ~1 for zero-filling and ~0 for the
+    ground truth. The MSE stays in raw normalised-sinogram units, where zero-filling
+    already scores only ~2e-2. At equal relative progress, the physics term therefore
+    weighs about λ / 2e-2 = 50 λ times the data term. Measured on the U-Net (orders 0-1): with
+    λ = 0.1 the norm of the physics gradient is 26 to 52 times the one of the MSE gradient and the
+    run under-fits (train MSE 11 times higher after 200 epochs); the ratio is proportional to λ,
+    i.e. ~0.3 for the default λ = 1e-3. optuna_search.py searches λ in [1e-5, 1e-2].
+
+    With a clean, fully supervised target, the penalty does not move the optimum: the
+    ground truth already satisfies the HLCC (normalised residual ~1e-5, see
+    tests/test_physics_loss.py). It only reshapes the optimisation path, i.e. it can act
+    as a regulariser at best.
     """
 
-    def __init__(self, geom, lambda_m0: float = 1.0, lambda_m1: float = 1.0, anneal_epochs: int = 50):
+    lambdas: torch.Tensor
+
+    def __init__(self, geom, lambda_m0: float = 1e-3, lambda_m1: float = 1e-3, anneal_epochs: int = 20,
+                 lambda_high: float = 1e-3, max_order: int = 1):
         super().__init__()
         self.data_loss_fn = nn.MSELoss()
-        self.physics_loss_fn = HelgasonLudwigLoss(geom)
-        self.lambda_m0 = lambda_m0
-        self.lambda_m1 = lambda_m1
+        self.physics_loss_fn = HelgasonLudwigLoss(geom, max_order)
+        lambdas = ([lambda_m0, lambda_m1] + [lambda_high] * max(0, max_order - 1))[: max_order + 1]
+        self.register_buffer("lambdas", torch.tensor(lambdas, dtype=torch.float32))
         self.anneal_epochs = anneal_epochs
         self._calibrated = False
 
@@ -134,14 +148,14 @@ class AnnealedLoss(nn.Module):
         return 0.5 * (1.0 - math.cos(math.pi * t))
 
     def forward(self, pred_sino: torch.Tensor, true_sino: torch.Tensor, current_epoch: int):
-        """``current_epoch`` is the number of COMPLETED epochs (0 during the first one)."""
+        """``current_epoch`` is the number of COMPLETED epochs (0 during the first one).
+
+        Returns (total loss, MSE, normalised physics losses [max_order + 1]).
+        """
         loss_data = self.data_loss_fn(pred_sino, true_sino)
+        physics_losses = self.physics_loss_fn(pred_sino)
 
-        loss_m0_norm, loss_m1_norm = self.physics_loss_fn(pred_sino)
-
-        alpha = self.alpha(current_epoch)
-
-        physics_term = alpha * (self.lambda_m0 * loss_m0_norm + self.lambda_m1 * loss_m1_norm)
+        physics_term = self.alpha(current_epoch) * (self.lambdas * physics_losses).sum()
         total_loss = loss_data + physics_term
 
-        return total_loss, loss_data, loss_m0_norm, loss_m1_norm
+        return total_loss, loss_data, physics_losses

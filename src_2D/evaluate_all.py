@@ -2,12 +2,26 @@
 
     python src_2D/evaluate_all.py
     python src_2D/evaluate_all.py --models ZeroFilling LinearInterp UNet2D GCN_L6 SNN_L6 --num_samples 200
+    python src_2D/evaluate_all.py --models UNet2D UNet2D_P4 UNet2D_N200 UNet2dHLCC_N200   # see factory.py for the suffixes
+
+A name ending with "_P4" is the model followed by the HLCC moment regression of orders 0..4 on the
+missing views (Huang et al. 2017, src_2D/utils/hlcc.py): a training-free post-processing.
 
 Outputs (in --out_dir):
-    model_comparison_metrics.csv   one row per (sample, model): sinogram + image metrics
+    model_comparison_metrics.csv   one row per (sample, model): sinogram + image metrics, the
+                                   Dirichlet-energy ratios prediction / ground truth on the wedge
+                                   (oversmoothing indicators, see metrics.smoothness_metrics) and the
+                                   HLCC residuals hlcc_residual_<n> of the orders 0..4 (share of the
+                                   moment curve of order n outside its harmonic space: 0 for a
+                                   consistent sinogram, ~1e-6 to 1e-5 for the ground truth)
     per_view_mse.csv               MSE of every view, per model: the error profile as a
                                    function of the angular distance to the acquired window,
                                    to be compared with the angular reach of each graph model.
+    per_view_var.csv               inter-sample variance of every view (mean over the detector),
+                                   per model and for the ground truth ("GroundTruth"). The latter
+                                   is the lowest per-view MSE that a prediction independent of the
+                                   measurements can reach on this test set: the floor of a graph
+                                   model beyond its angular reach, where its own variance is 0.
 
 A model whose checkpoint is missing, legacy, or trained on another geometry is reported as
 NOT EVALUATED and left out of the table: a randomly initialised network is never scored.
@@ -30,15 +44,24 @@ from src_2D.conf.geometry_conf_2d import DBTGeometryConfig
 from src_2D.data.dataset_2d import SinogramCompletionDataset
 from src_2D.geometry.dbt_geometry_2d import DBTGeometry
 from src_2D.models.factory import get_model
+from src_2D.models.SinoSheavesNN.physics_loss import HelgasonLudwigLoss
 from src_2D.utils.evaluation import build_full_astra_geometries, reconstruct_volume_fbp
-from src_2D.utils.metrics import sinogram_metrics, ssim
+from src_2D.utils.metrics import PerViewMoments, sinogram_metrics, smoothness_metrics, ssim
 
 torch.backends.cudnn.enabled = False
 
 DEFAULT_MODELS = [
-    "ZeroFilling", "LinearInterp", "UNet2D", "UNet2dHLCC",
+    "ZeroFilling", "LinearInterp", "UNet2D", "UNet2dHLCC", "UNet2D_P4", "UNet2dHLCC_P4",
     "GCN_L6", "GCN_L12", "GCN_L18", "SNN_L6", "SNN_L12", "SNN_L18",
 ]
+GROUND_TRUTH = "GroundTruth"  # column of per_view_var.csv
+HLCC_METRIC_ORDER = 4         # highest order of the hlcc_residual_<n> columns
+
+
+def hlcc_metrics(sinogram: np.ndarray, consistency: HelgasonLudwigLoss) -> dict:
+    """Relative HLCC residual of every order of one [V, D] sinogram (see HelgasonLudwigLoss.relative_residuals)."""
+    residuals = consistency.relative_residuals(torch.from_numpy(np.ascontiguousarray(sinogram)))[0]
+    return {f"hlcc_residual_{order}": float(value) for order, value in enumerate(residuals)}
 
 
 def image_metrics(sinogram: np.ndarray, phantom: np.ndarray, config, proj_geom, vol_geom) -> dict:
@@ -59,13 +82,19 @@ def evaluate_models(models: dict, dataset, device, config: DBTGeometryConfig):
     missing_views = ~geom.acquired_view_mask
     proj_geom, vol_geom = build_full_astra_geometries(config, config.image_shape)
 
+    consistency = HelgasonLudwigLoss(geom, max_order=HLCC_METRIC_ORDER)
+
     rows = []
+    hlcc_ground_truth = []
     per_view_sq_err = {name: np.zeros(geom.num_views) for name in models}
+    moments = {name: PerViewMoments() for name in [GROUND_TRUTH, *models]}
 
     for i in tqdm(range(len(dataset)), desc="Evaluating samples"):
         incomplete, full, phantom = dataset[i]
         full_np = full[0].numpy()
         phantom_np = phantom[0].numpy()
+        moments[GROUND_TRUTH].update(full_np)
+        hlcc_ground_truth.append(hlcc_metrics(full_np, consistency))
 
         if i == 0:
             rows.append({"Sample": -1, "Model": "GroundTruthSinogram (FBP reference)",
@@ -75,16 +104,24 @@ def evaluate_models(models: dict, dataset, device, config: DBTGeometryConfig):
             # Every model, learned or not, shares the same interface.
             pred = model(incomplete.unsqueeze(0).to(device))[0, 0].float().cpu().numpy()
             per_view_sq_err[name] += ((pred - full_np) ** 2).mean(axis=1)
+            moments[name].update(pred)
             rows.append({
                 "Sample": i, "Model": name,
                 **sinogram_metrics(pred, full_np, missing_views),
+                **smoothness_metrics(pred, full_np, missing_views),
+                **hlcc_metrics(pred, consistency),
                 **image_metrics(pred, phantom_np, config, proj_geom, vol_geom),
             })
 
-    per_view = pd.DataFrame({name: err / len(dataset) for name, err in per_view_sq_err.items()})
-    per_view.insert(0, "angle_deg", np.rad2deg(geom.angles))
-    per_view.insert(1, "acquired", geom.acquired_view_mask)
-    return pd.DataFrame(rows), per_view
+    def per_view_table(values: dict) -> pd.DataFrame:
+        table = pd.DataFrame(values)
+        table.insert(0, "angle_deg", np.rad2deg(geom.angles))
+        table.insert(1, "acquired", geom.acquired_view_mask)
+        return table
+
+    per_view = per_view_table({name: err / len(dataset) for name, err in per_view_sq_err.items()})
+    per_view_var = per_view_table({name: m.per_view_variance() for name, m in moments.items()})
+    return pd.DataFrame(rows), per_view, per_view_var, pd.DataFrame(hlcc_ground_truth)
 
 
 def main():
@@ -116,9 +153,10 @@ def main():
         print("No model could be loaded. Train them first with src_2D/train.py.")
         return
 
-    results, per_view = evaluate_models(models, dataset, device, config)
+    results, per_view, per_view_var, hlcc_ground_truth = evaluate_models(models, dataset, device, config)
     results.to_csv(args.out_dir / "model_comparison_metrics.csv", index=False)
     per_view.to_csv(args.out_dir / "per_view_mse.csv", index=False)
+    per_view_var.to_csv(args.out_dir / "per_view_var.csv", index=False)
 
     metric_cols = ["mse_wedge", "psnr_wedge", "ssim_wedge", "ssim", "img_psnr", "img_ssim"]
     per_model = results[results["Sample"] >= 0].groupby("Model", sort=False)[metric_cols]
@@ -130,7 +168,13 @@ def main():
     print(f"\nTest split: {len(dataset)} samples, sinogram data_range = 1.0, image metrics after FBP (ram-lak)")
     print(results[results["Sample"] < 0][["Model", "img_psnr", "img_ssim"]].to_string(index=False))
     print(summary.to_string())
-    print(f"\nSaved to {args.out_dir}/model_comparison_metrics.csv and per_view_mse.csv")
+
+    hlcc_cols = list(hlcc_ground_truth.columns)
+    hlcc_summary = results[results["Sample"] >= 0].groupby("Model", sort=False)[hlcc_cols].mean()
+    hlcc_summary.loc[GROUND_TRUTH] = hlcc_ground_truth.mean()
+    print("\nHLCC residual per order, mean over the samples (0: consistent sinogram; the ground truth is the floor)")
+    print(hlcc_summary.to_string(float_format=lambda value: f"{value:.2e}"))
+    print(f"\nSaved to {args.out_dir}/model_comparison_metrics.csv, per_view_mse.csv and per_view_var.csv")
 
 
 if __name__ == "__main__":

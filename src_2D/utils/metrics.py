@@ -12,7 +12,7 @@ Conventions (to be stated in the thesis):
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from skimage.metrics import structural_similarity
@@ -62,3 +62,68 @@ def sinogram_metrics(pred: np.ndarray, target: np.ndarray, missing_views: np.nda
 
 
 METRIC_KEYS = ("mse", "psnr", "ssim", "mse_wedge", "psnr_wedge", "ssim_wedge")
+
+
+def _wedge_dirichlet_energies(sinogram: np.ndarray, missing_views: np.ndarray) -> Tuple[float, float]:
+    """Dirichlet energies of the wedge of a [V, D] sinogram, along the angle and along the detector.
+
+    Along the angle, only pairs of consecutive MISSING views count: the pairs that straddle the
+    border of the acquired window (copied by data consistency) are left out.
+    """
+    consecutive_missing = missing_views[1:] & missing_views[:-1]
+    d_angle = np.diff(sinogram, axis=0)[consecutive_missing]
+    d_detector = np.diff(sinogram[missing_views], axis=1)
+    return float(np.sum(d_angle**2)), float(np.sum(d_detector**2))
+
+
+def smoothness_metrics(pred: np.ndarray, target: np.ndarray, missing_views: np.ndarray) -> Dict[str, float]:
+    """Oversmoothing indicators of one completed sinogram, on the missing wedge.
+
+    Ratios of Dirichlet energies prediction / ground truth, along the angle and along the detector:
+    1 means as much variation as the ground truth, < 1 smoother (a washed-out, "grey" wedge),
+    > 1 rougher (noise, artefacts).
+    """
+    missing_views = np.asarray(missing_views, dtype=bool)
+    pred_angle, pred_detector = _wedge_dirichlet_energies(np.asarray(pred, dtype=np.float64), missing_views)
+    true_angle, true_detector = _wedge_dirichlet_energies(np.asarray(target, dtype=np.float64), missing_views)
+    return {
+        "dirichlet_angle_ratio": pred_angle / max(true_angle, 1e-12),
+        "dirichlet_detector_ratio": pred_detector / max(true_detector, 1e-12),
+    }
+
+
+class PerViewMoments:
+    """Streaming inter-sample variance of [V, D] sinograms, reduced per view.
+
+    ``per_view_variance()`` is the population variance over the samples (1/n), averaged over the
+    detector. For the ground truth, it is exactly the lowest per-view MSE that a prediction
+    independent of the measurements (the same for every sample) can reach on these samples: the
+    floor of a graph model beyond its angular reach.
+
+    The sums are shifted by the first sample, so that a quantity identical for every sample gets a
+    variance of exactly 0 (not a rounding residual).
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self._shift: Optional[np.ndarray] = None
+        self._sum: Optional[np.ndarray] = None
+        self._sum_sq: Optional[np.ndarray] = None
+
+    def update(self, sinogram: np.ndarray) -> None:
+        x = np.asarray(sinogram, dtype=np.float64)
+        if self._shift is None:
+            self._shift = x.copy()
+            self._sum = np.zeros_like(x)
+            self._sum_sq = np.zeros_like(x)
+        delta = x - self._shift
+        self._sum += delta
+        self._sum_sq += delta**2
+        self.count += 1
+
+    def per_view_variance(self) -> np.ndarray:
+        if self._sum is None or self._sum_sq is None:
+            raise ValueError("No sample was accumulated.")
+        mean = self._sum / self.count
+        variance = np.maximum(self._sum_sq / self.count - mean**2, 0.0)
+        return variance.mean(axis=1)
