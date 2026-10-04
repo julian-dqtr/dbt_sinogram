@@ -470,6 +470,47 @@ physique entre vues voisines.* Les deux premières limites pointent vers la pers
 section 7, qui lève la portée. La troisième ne peut pas être levée par un transport fixé
 par la géométrie : seul le niveau des moments en admet un.
 
+### 6 bis. Le SNN du protocole depuis le 03/10 : transport par décalage
+
+Les sections 6.1 à 6.5 décrivent le premier SNN (rotations $SO(2)$). Ses études Optuna (27 et
+28/09) donnaient la même erreur que le GCN, comme le prévoit le point 2. Le SNN du protocole
+utilise désormais le transport suggéré par le point 5 (`ViewTransport(transport="shift")`,
+`graph_data.build_shift_phases`).
+
+- **Définition.** Chaque stalk $f$ (2 canaux) reçoit une pente $t_f$, et les 32 pentes sont
+  réparties uniformément sur $[-99, 99]$ mm/rad, la demi-diagonale du carré reconstruit. Sur
+  l'arête $j\to i$, la restriction map translate la ligne détecteur du stalk $f$ de
+  $t_f(\theta_i-\theta_j)$, soit au plus 6,5 pixels sur le graphe $k=12$. Un point situé à la
+  profondeur $t$ le long des rayons a une trace de pente $|ds/d\theta|=|t|$ : le stalk $f$
+  **aligne les vues voisines sur les points de profondeur $t_f$** avant de les moyenner. C'est
+  exactement le *shift-and-add* de la tomosynthèse, au premier ordre en $\Delta\theta$ (le terme
+  $s(1-\cos\Delta\theta)$ négligé vaut au plus 0,34 pixel).
+- **Ce qui ne change pas.** La translation se factorise en
+  $S(t_f\theta_i)\,S(-t_f\theta_j)$ : c'est encore une **jauge pure**, donc une connexion
+  plate. Le code l'applique ainsi, en Fourier, avec un padding en rampe qui évite les
+  discontinuités. L'opérateur d'agrégation reste celui du GCN dans un autre repère. La portée
+  reste exactement $L\cdot k/2$ (même test), et le nombre de paramètres est identique.
+- **Ce qui change : le repère est physique.** Dans la jauge du stalk $f$, la trace des points de
+  profondeur $t_f$ est horizontale. Le lissage angulaire du GCN, qui moyenne à $s$ fixé, devient
+  alors exact pour ces points, au lieu de brouiller leurs traces le long du détecteur. Les
+  convolutions détecteur commutent avec les translations. Seul le mélange $1\times1$ entre
+  stalks de pentes différentes devient un décalage qui dépend de la vue.
+- **Motivation mesurée (test, 03/10).** Le GCN n'est pas trop lisse le long de l'angle : à L18, la
+  médiane de `dirichlet_angle_ratio` vaut 0,99. Il est en revanche nettement flou le long du
+  détecteur : `dirichlet_detector_ratio` vaut 0,40, contre 0,78 pour le U-Net. C'est la signature
+  attendue d'une moyenne de traces mal alignées. Cette observation est **exploratoire** : le
+  critère du plan, fixé à l'avance (rapport angulaire), reste inchangé.
+- **Résultat (test, 04/10, une seed).** À 18 couches, le SNN-shift réduit `mse_wedge` de 20 %
+  par rapport au GCN (meilleur sur 166 échantillons sur 200, p = 1e-21), à toutes les distances
+  de la fenêtre, et ce gain persiste après P4. À 12 couches, la différence n'est pas
+  significative (−3 %) : le SNN est moins bon près de la fenêtre et meilleur au bout du wedge.
+  Le flou le long du détecteur n'est presque pas corrigé (rapport médian de 0,44 contre 0,40).
+  Le gain ne vient donc pas principalement de là. Le critère fixé à l'avance n'est pas rempli
+  (`plan_experiences_gnn.md`, mise à jour du 03/10).
+- **Ce qu'il ne faut pas promettre.** Le décalage ne lève pas la limite de portée, et il
+  n'invente pas la profondeur. Le réseau doit diriger chaque structure vers le stalk de la bonne
+  pente, à partir d'une fenêtre de ±25° qui résout mal la profondeur.
+
 ---
 
 ## 7. Perspective : « Sheaf Attention / Transformer »

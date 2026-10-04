@@ -1,0 +1,18 @@
+\begin{tabular}{lllllllllll}
+\toprule
+ & Parameters & Training phantoms & GPU & GPUs & VRAM / GPU (GiB) & Peak VRAM / GPU (GiB) & Epochs (best) & Training time & Time / epoch (s) & GPU-hours \\
+Model &  &  &  &  &  &  &  &  &  &  \\
+\midrule
+LinearInterp & 0 & — & — & — & — & — & — & — & — & — \\
+ZeroFilling & 0 & — & — & — & — & — & — & — & — & — \\
+UNet2D & 2,141,249 & 2000 & Tesla K80 & 8 & 11.2 & 0.35 & 200 (103) & 0 h 51 min & 15.6 & 6.9 \\
+UNet2D\_N200 & 2,141,249 & 200 $\times$ 10 & Tesla K80 & 8 & 11.2 & 0.35 & 200 (72) & 0 h 51 min & 15.5 & 6.9 \\
+UNet2dHLCC & 2,141,249 & 2000 & Tesla K80 & 8 & 11.2 & 0.35 & 200 (145) & 0 h 51 min & 15.6 & 6.9 \\
+UNet2dHLCC\_N200 & 2,141,249 & 200 $\times$ 10 & Tesla K80 & 8 & 11.2 & 0.35 & 200 (93) & 0 h 52 min & 15.6 & 6.9 \\
+GCN\_L6 & 207,585 & 2000 & Tesla K80 & 8 & 11.2 & 2.04 & 200 (197) & 1 h 35 min & 28.8 & 12.8 \\
+GCN\_L12 & 406,881 & 2000 & Tesla K80 & 8 & 11.2 & 3.90 & 200 (197) & 2 h 58 min & 53.7 & 23.8 \\
+GCN\_L18 & 606,177 & 2000 & Tesla K80 & 8 & 11.2 & 5.76 & 200 (193) & 4 h 21 min & 78.6 & 34.9 \\
+SNN\_L12 & 406,881 & 2000 & Tesla K80 & 8 & 11.2 & 4.20 & 200 (197) & 3 h 41 min & 66.4 & 29.5 \\
+SNN\_L18 & 606,177 & 2000 & Tesla K80 & 8 & 11.2 & 6.20 & 200 (197) & 5 h 26 min & 97.8 & 43.5 \\
+\bottomrule
+\end{tabular}

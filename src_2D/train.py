@@ -115,6 +115,18 @@ def uses_physics(args) -> bool:
     return args.physics == "hlcc"
 
 
+def hardware_stats(device: torch.device, is_distributed: bool) -> Dict:
+    """GPU model, memory per GPU and peak memory allocated by PyTorch on any rank (the training cost table).
+    Collective under DDP: every rank must call it."""
+    if device.type != "cuda":
+        return {"device": "cpu"}
+    peak = torch.tensor([torch.cuda.max_memory_allocated(device)], dtype=torch.float64, device=device)
+    if is_distributed:
+        dist.all_reduce(peak, op=dist.ReduceOp.MAX)
+    props = torch.cuda.get_device_properties(device)
+    return {"device": props.name, "gpu_memory_gib": props.total_memory / 2**30, "peak_memory_gib": peak.item() / 2**30}
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -240,6 +252,8 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
             print(f"[baseline] {name:13s} mse_wedge={m['mse_wedge']:.5f} ssim_wedge={m['ssim_wedge']:.4f} ssim={m['ssim']:.4f}")
 
     best, history, epochs_without_improvement = None, [], 0
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     start_time = time.time()
 
     for epoch in range(1, args.epochs + 1):
@@ -317,9 +331,11 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
 
     if best is None:
         raise RuntimeError("No epoch was run: --n_epochs must be >= 1.")
+    training_time = time.time() - start_time
+    hardware = hardware_stats(device, is_distributed)
 
     if is_main and save:
-        stats = {"training_time_seconds": time.time() - start_time, "world_size": world_size, "num_params": num_params,
+        stats = {"training_time_seconds": training_time, "world_size": world_size, "num_params": num_params, **hardware,
                  "n_samples": args.n_samples, "train_repeats": args.train_repeats,
                  "best": best, "baselines": baselines, "epochs_run": len(history)}
         (checkpoint_dir / "training_stats.json").write_text(json.dumps(stats, indent=2))

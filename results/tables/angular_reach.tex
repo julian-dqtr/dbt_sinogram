@@ -1,0 +1,14 @@
+\begin{tabular}{lrlrrrr}
+\toprule
+ & split at d (deg) & views beyond & MSE within reach & MSE beyond reach & max std beyond (theory: 0) & min MSE / floor beyond (theory: $\geq$ 1) \\
+Model &  &  &  &  &  &  \\
+\midrule
+GCN\_L6 & 36 & 57 / 129 (44\%) & 0.00199 & 0.0181 & 0 & 1.39 \\
+GCN\_L12 & 72 & 0 / 129 (0\%) & 0.0027 & NaN & NaN & NaN \\
+GCN\_L18 & 108 & 0 / 129 (0\%) & 0.0024 & NaN & NaN & NaN \\
+SNN\_L12 & 72 & 0 / 129 (0\%) & 0.00261 & NaN & NaN & NaN \\
+SNN\_L18 & 108 & 0 / 129 (0\%) & 0.00193 & NaN & NaN & NaN \\
+UNet2D & 36 & 57 / 129 (44\%) & 0.000458 & 0.00127 & NaN & NaN \\
+LinearInterp & 36 & 57 / 129 (44\%) & 0.00462 & 0.0128 & NaN & NaN \\
+\bottomrule
+\end{tabular}

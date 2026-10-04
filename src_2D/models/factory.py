@@ -4,8 +4,8 @@ Learned models (all share the ``completed = model(incomplete)`` interface):
 
     "UNet2D"      U-Net, MSE loss
     "UNet2dHLCC"  same U-Net, MSE + HLCC loss
-    "GCN"         view-graph GCN baseline (no rotation)
-    "SNN"         SinoSheavesNN (hard-coded SO(2) restriction maps)
+    "GCN"         view-graph GCN baseline (identity transport)
+    "SNN"         SinoSheavesNN (hard-coded restriction maps translating the stalks along the detector)
 
 Graph models accept a depth suffix selecting the run: "GCN_L6", "SNN_L12", "SNN_L18"...
 

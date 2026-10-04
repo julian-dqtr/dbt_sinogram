@@ -7,8 +7,8 @@ degrees) with four learned models sharing ONE protocol:
 |---|---|---|
 | `UNet2D` | U-Net (residual, hard data consistency) | MSE |
 | `UNet2dHLCC` | the same network | MSE + annealed Helgason-Ludwig (HLCC) penalty, orders 0-1 (`--hlcc_max_order 3`: orders 0-3) |
-| `GCN` | view-graph GCN, kNN k = 12, no rotation | MSE (`--physics hlcc` optional) |
-| `SNN` | SinoSheavesNN: same graph and parameters, hard-coded SO(2) maps R(delta theta) | idem |
+| `GCN` | view-graph GCN, kNN k = 12, identity transport | MSE (`--physics hlcc` optional) |
+| `SNN` | SinoSheavesNN: same graph and parameters, hard-coded shift maps: stalk f translated along the detector by t_f (theta_i - theta_j), one depth t_f per stalk | idem |
 
 Graph models are compared at depths 6 / 12 / 18 (`--num_layers`): their angular reach is
 `num_layers * k/2` views = 36 / 72 / 108 degrees, while the farthest missing view is 65
@@ -33,9 +33,13 @@ bash scripts/launch_optuna_8gpus.sh SNN 12
 # Graph models (docs/plan_experiences_gnn.md): the six lr / weight_decay studies, one after the other
 bash scripts/launch_gnn_optuna_queue.sh
 .venv/bin/python scripts/launch_best_training.py GCN_L6_parallel_optimizer_only --run
+.venv/bin/python scripts/launch_best_training.py GCN_L12_parallel_optimizer_only --model SNN --run   # SNN, GCN configuration
 
 # Evaluation on the immutable test split (+ per-view error profile and inter-sample variance)
 .venv/bin/python src_2D/evaluate_all.py
+# Analysis: run results/model_analysis.ipynb. It writes the thesis tables (CSV + LaTeX, booktabs) to results/tables/
+# and the figures (PDF) to results/figures/, both versioned. Peak VRAM of the runs trained before 2026-10-04:
+.venv/bin/python scripts/measure_peak_vram.py
 
 # U-Net vs U-Net + HLCC with few (200) and many (2000) training phantoms, one run after the other,
 # then the paired comparison on the test split (tables + figures)

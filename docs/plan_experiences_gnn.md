@@ -3,6 +3,44 @@
 Statut (27/09) : **plan validé** (D1 = option A1, D2, D3). **Phase 0 faite** pour P1 à P4. P5 et
 P6 (smoke test) sont reportés. Prochaine étape : la phase 1, que tu lances toi-même.
 
+**Mise à jour du 03/10.**
+- **GCN.** Les phases 1 à 3 sont faites. Les entraînements finaux L6, L12 et L18 ont tourné le
+  03/10 (200 epochs, 8 GPU), avec un meilleur epoch à 197, 197 et 193. Sur le test,
+  `mse_wedge` vaut 9,13e-3, 2,70e-3 et 2,40e-3, contre 8,24e-3 pour LinearInterp et 8,15e-4 pour
+  UNet2D. Le théorème de portée est vérifié sur GCN_L6. Avec P4, le gain est de −71 %, −32 % et
+  −23 %, contre −11 % pour UNet2D.
+- **SNN.** Il utilise désormais le **transport par décalage** (`harmonic_sheaves.md` §6 bis), et
+  non plus $SO(2)$.
+  - Les études `SNN_L{6,12}_parallel_optimizer_only` portent sur l'ancien SNN $SO(2)$ : elles
+    sont obsolètes, et `launch_best_training.py` ne doit plus les utiliser.
+  - Le SNN est entraîné **avec la configuration Optuna du GCN** de même profondeur
+    (`launch_best_training.py GCN_L{L}_parallel_optimizer_only --model SNN`) : seul le transport
+    diffère.
+  - **L6 est sauté** : il est limité par la portée pour les deux modèles (D3).
+  - Les runs SNN L12 puis L18 sont lancés le 03/10 au soir (tmux `snn_final`).
+- **Résultats SNN-shift (test, 04/10).** 200 epochs, meilleur epoch à 197 pour les deux runs ;
+  3 h 41 pour L12 et 5 h 26 pour L18.
+
+  | | GCN | SNN | écart | SNN meilleur | Wilcoxon p |
+  |---|---|---|---|---|---|
+  | `mse_wedge` L12 | 2,70e-3 | 2,61e-3 | −3,4 % | 108/200 | 0,24 |
+  | `mse_wedge` L18 | 2,40e-3 | 1,93e-3 | **−19,7 %** | 166/200 | 1e-21 |
+  | + P4, L12 | 1,84e-3 | 1,89e-3 | +2,7 % | 88/200 | 0,03 |
+  | + P4, L18 | 1,84e-3 | 1,47e-3 | **−20,0 %** | 169/200 | 5e-22 |
+
+  - À L18, le SNN est meilleur à toutes les distances (−15 à −30 %).
+  - À L12, il est moins bon près de la fenêtre (+43 % pour d ≤ 12°) mais meilleur au bout du
+    wedge (−24 % pour d = 60–65°, ρ 0,76 contre 0,65). Il porte l'information plus loin que la
+    portée effective du GCN.
+  - **Le critère du §4.2 n'est pas rempli** : à L12, `mse_wedge` n'est pas significatif ; à L18,
+    le rapport angulaire ne l'est pas (p = 0,54). Le gain de L18 est donc à présenter comme
+    exploratoire. Il repose aussi sur une seule seed : une seconde seed de la paire L18 dirait si
+    −20 % dépasse le bruit d'un entraînement à l'autre.
+  - Le rapport le long du détecteur reste loin de celui du U-Net (médianes 0,44 à L18 et 0,33 à
+    L12, contre 0,78) : le décalage n'a pas réglé le flou le long du détecteur.
+- **Critère (a)/(b).** Il reste celui du §4.2, fixé à l'avance. Le rapport le long du détecteur
+  (GCN_L18 0,40 contre UNet2D 0,78) est rapporté comme observation exploratoire.
+
 Règle d'or respectée : aucun nouveau modèle. On n'utilise que `SinoGCN` (transport identité) et
 `SinoSheafNet` (rotations $SO(2)$ codées en dur), déjà présents dans `src_2D/models/SinoSheavesNN/`.
 Le code ajouté en phase 0 sert uniquement à l'optimisation, à l'évaluation et aux figures.

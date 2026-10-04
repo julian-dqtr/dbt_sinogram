@@ -1,0 +1,19 @@
+\begin{tabular}{llllll}
+\toprule
+ &  & mse\_wedge & Change & Better on & Wilcoxon p \\
+Effect & Training phantoms &  &  &  &  \\
+\midrule
+\multirow[t]{2}{*}{HLCC loss (UNet2dHLCC vs UNet2D)} & 200 & 2.75e-03 $\rightarrow$ 2.71e-03 & -1.4 \% & 117 / 200 & 0.036 \\
+ & 2000 & 8.15e-04 $\rightarrow$ 8.17e-04 & +0.2 \% & 122 / 200 & 0.067 \\
+\cline{1-6}
+\multirow[t]{2}{*}{HLCC loss, both followed by P4} & 200 & 2.01e-03 $\rightarrow$ 1.99e-03 & -1.2 \% & 109 / 200 & 0.3 \\
+ & 2000 & 7.26e-04 $\rightarrow$ 7.36e-04 & +1.4 \% & 116 / 200 & 0.54 \\
+\cline{1-6}
+\multirow[t]{2}{*}{P4 after UNet2D} & 200 & 2.75e-03 $\rightarrow$ 2.01e-03 & -26.8 \% & 199 / 200 & 1.6e-34 \\
+ & 2000 & 8.15e-04 $\rightarrow$ 7.26e-04 & -11.0 \% & 189 / 200 & 1.8e-31 \\
+\cline{1-6}
+\multirow[t]{2}{*}{P4 after UNet2dHLCC} & 200 & 2.71e-03 $\rightarrow$ 1.99e-03 & -26.6 \% & 199 / 200 & 1.5e-34 \\
+ & 2000 & 8.17e-04 $\rightarrow$ 7.36e-04 & -9.9 \% & 185 / 200 & 1.7e-29 \\
+\cline{1-6}
+\bottomrule
+\end{tabular}

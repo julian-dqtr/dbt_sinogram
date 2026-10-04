@@ -1,0 +1,14 @@
+\begin{tabular}{lllllllll}
+\toprule
+ & Projection & mse\_wedge & mse\_wedge + projection & Change & Better on & Wilcoxon p & img\_psnr & img\_ssim \\
+Model &  &  &  &  &  &  &  &  \\
+\midrule
+UNet2D & P4 & 8.15e-04 & 7.26e-04 & -11.0 \% & 189 / 200 & 1.8e-31 & 23.35 $\rightarrow$ 23.41 & 0.5337 $\rightarrow$ 0.5369 \\
+UNet2dHLCC & P4 & 8.17e-04 & 7.36e-04 & -9.9 \% & 185 / 200 & 1.7e-29 & 23.43 $\rightarrow$ 23.47 & 0.5282 $\rightarrow$ 0.5304 \\
+SNN\_L18 & P4 & 1.93e-03 & 1.47e-03 & -23.7 \% & 199 / 200 & 1.6e-34 & 20.96 $\rightarrow$ 21.15 & 0.4367 $\rightarrow$ 0.4464 \\
+GCN\_L18 & P4 & 2.40e-03 & 1.84e-03 & -23.4 \% & 198 / 200 & 1.5e-34 & 20.25 $\rightarrow$ 20.47 & 0.4046 $\rightarrow$ 0.4170 \\
+SNN\_L12 & P4 & 2.61e-03 & 1.89e-03 & -27.4 \% & 200 / 200 & 1.4e-34 & 20.11 $\rightarrow$ 20.39 & 0.3929 $\rightarrow$ 0.4137 \\
+GCN\_L12 & P4 & 2.70e-03 & 1.84e-03 & -31.7 \% & 200 / 200 & 1.4e-34 & 20.13 $\rightarrow$ 20.46 & 0.3651 $\rightarrow$ 0.3831 \\
+GCN\_L6 & P4 & 9.13e-03 & 2.64e-03 & -71.0 \% & 200 / 200 & 1.4e-34 & 18.49 $\rightarrow$ 19.52 & 0.3040 $\rightarrow$ 0.3722 \\
+\bottomrule
+\end{tabular}

@@ -1,0 +1,19 @@
+\begin{tabular}{lllllll}
+\toprule
+ &  &  & mse\_wedge & img\_psnr & img\_ssim & hlcc\_residual\_1 \\
+Training phantoms & Model & Moment regression &  &  &  &  \\
+\midrule
+\multirow[t]{4}{*}{200} & \multirow[t]{2}{*}{UNet2D} & — & 2.75e-03 $\pm$ 3.27e-03 & 19.53 & 0.3762 & 0.0444 \\
+ &  & P4 & 2.01e-03 $\pm$ 2.03e-03 & 19.77 & 0.3808 & 0.0092 \\
+\cline{2-7}
+ & \multirow[t]{2}{*}{UNet2dHLCC} & — & 2.71e-03 $\pm$ 3.40e-03 & 19.55 & 0.3844 & 0.0330 \\
+ &  & P4 & 1.99e-03 $\pm$ 2.05e-03 & 19.79 & 0.3883 & 0.0072 \\
+\cline{1-7} \cline{2-7}
+\multirow[t]{4}{*}{2000} & \multirow[t]{2}{*}{UNet2D} & — & 8.15e-04 $\pm$ 1.10e-03 & 23.35 & 0.5337 & 0.0121 \\
+ &  & P4 & 7.26e-04 $\pm$ 9.28e-04 & 23.41 & 0.5369 & 0.0019 \\
+\cline{2-7}
+ & \multirow[t]{2}{*}{UNet2dHLCC} & — & 8.17e-04 $\pm$ 1.16e-03 & 23.43 & 0.5282 & 0.0091 \\
+ &  & P4 & 7.36e-04 $\pm$ 9.77e-04 & 23.47 & 0.5304 & 0.0015 \\
+\cline{1-7} \cline{2-7}
+\bottomrule
+\end{tabular}

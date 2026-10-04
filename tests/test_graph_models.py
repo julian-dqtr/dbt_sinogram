@@ -1,9 +1,13 @@
-"""GCN baseline vs SinoSheavesNN: same topology, same parameters, only the restriction maps differ."""
+"""GCN baseline vs SinoSheavesNN: same topology, same parameters, only the restriction maps differ.
+
+The SNN translates every stalk along the detector by t_f (theta_i - theta_j) (transport "shift"); the rotation
+transport "so2" of the first SNN is still tested at the level of its operators."""
 import numpy as np
 import pytest
 import torch
 
 from src_2D.models.factory import build_model, get_model
+from src_2D.models.SinoSheavesNN.snn_layers import ViewTransport
 from src_2D.models.SinoSheavesNN.snn_model import ViewGraphNet
 from src_2D.models.SinoSheavesNN.graph_data import build_adjacency, build_transport_operators, normalize_adjacency
 from src_2D.utils.checkpoint import save_checkpoint
@@ -47,16 +51,16 @@ def test_restriction_maps_are_rotations_fixed_by_the_angles(geom):
 def test_both_models_instantiate_at_every_depth_with_identical_parameters(num_layers, config):
     gcn, gcn_cfg = build_model(f"GCN_L{num_layers}", config, **SMALL)
     snn, snn_cfg = build_model(f"SNN_L{num_layers}", config, **SMALL)
-    assert isinstance(gcn, ViewGraphNet) and isinstance(snn, ViewGraphNet) and snn.a_sin is not None
+    assert isinstance(gcn, ViewGraphNet) and isinstance(snn, ViewGraphNet)
     assert gcn_cfg["num_layers"] == snn_cfg["num_layers"] == num_layers and gcn_cfg["k"] == 12
-    assert gcn.transport == "identity" and snn.transport == "so2"
+    assert gcn.transport_op.transport == "identity" and snn.transport_op.transport == "shift"
     assert [(k, v.shape) for k, v in gcn.state_dict().items()] == [(k, v.shape) for k, v in snn.state_dict().items()]
-    assert torch.equal(gcn.a_cos > 0, snn.a_cos.abs() + snn.a_sin.abs() > 0), "same topology"
+    assert torch.equal(gcn.transport_op.a_hat, snn.transport_op.a_hat), "same topology and weights"
     assert snn.angular_reach_deg == num_layers * 6.0
 
 
-def test_snn_reduces_to_gcn_when_rotations_are_identity(config, clean_val_batch):
-    """With R = I the SNN code path must give exactly the GCN: the ablation isolates the rotation."""
+def test_snn_reduces_to_gcn_when_the_slopes_are_zero(config, clean_val_batch):
+    """With every translation set to 0 the SNN code path (FFT and back) gives the GCN: the ablation isolates the transport."""
     incomplete = clean_val_batch[0][:2]
     gcn, _ = build_model("GCN", config, num_layers=2, **SMALL)
     snn, _ = build_model("SNN", config, num_layers=2, **SMALL)
@@ -65,19 +69,17 @@ def test_snn_reduces_to_gcn_when_rotations_are_identity(config, clean_val_batch)
     gcn.eval()
     snn.eval()
     with torch.no_grad():
-        assert not torch.allclose(snn(incomplete), gcn(incomplete), atol=1e-5), "the rotation has no effect"
-        snn.a_cos, snn.a_sin = gcn.a_cos.clone(), torch.zeros_like(gcn.a_cos)
+        assert not torch.allclose(snn(incomplete), gcn(incomplete), atol=1e-5), "the translation has no effect"
+        snn.transport_op.phase[..., 0], snn.transport_op.phase[..., 1] = 1.0, 0.0
         torch.testing.assert_close(snn(incomplete), gcn(incomplete), atol=1e-5, rtol=1e-4)
 
 
-def test_dense_aggregation_matches_an_explicit_edge_loop(geom):
-    from src_2D.models.SinoSheavesNN.snn_layers import ViewGraphConv
+def test_so2_aggregation_matches_an_explicit_edge_loop(geom):
     torch.manual_seed(0)
-    a_cos, a_sin = build_transport_operators(geom.angles, "so2", k=4)
     a_hat, _ = build_transport_operators(geom.angles, "identity", k=4)
     theta = torch.as_tensor(geom.angles, dtype=torch.float32)
     x = torch.randn(1, 4, geom.num_views, 3)  # 2 stalks, 3 detector pixels
-    dense = ViewGraphConv(num_stalks=2).aggregate(x, a_cos, a_sin)
+    dense = ViewTransport(geom.angles, "so2", num_stalks=2, k=4)(x)
 
     i = 50
     expected = torch.zeros(4, 3)
@@ -87,6 +89,61 @@ def test_dense_aggregation_matches_an_explicit_edge_loop(geom):
         for f in range(2):  # stalk f = channels (2f, 2f + 1)
             expected[2 * f:2 * f + 2] += a_hat[i, j] * (R @ x[0, 2 * f:2 * f + 2, j])
     torch.testing.assert_close(dense[0, :, i], expected, atol=1e-5, rtol=1e-4)
+
+
+def shift_transport(geom, config, num_stalks=4, k=4):
+    return ViewTransport(geom.angles, "shift", num_stalks, k=k, num_pixels=config.det_col_count,
+                         pixel_size_mm=config.det_pixel_size_mm, max_depth_mm=99.0)
+
+
+def test_shift_aggregation_matches_an_explicit_edge_loop(geom, config):
+    """The gauge factorisation S(t theta_i) A_hat S(-t theta_j) equals the per-edge translation S(t (theta_i - theta_j))."""
+    torch.manual_seed(0)
+    transport = shift_transport(geom, config)
+    L, Lp = config.det_col_count, transport.padded_length
+    x = torch.randn(1, 8, geom.num_views, L, dtype=torch.float64)  # 4 stalks
+    dense = transport.double()(x)
+
+    i = 90
+    theta = torch.as_tensor(geom.angles, dtype=torch.float64)
+    a_hat = transport.a_hat
+    omega = 2 * np.pi * torch.arange(Lp // 2 + 1, dtype=torch.float64) / Lp
+    expected = torch.zeros(8, L, dtype=torch.float64)
+    for j in torch.nonzero(a_hat[i]).flatten().tolist():
+        for c in range(8):
+            line = x[0, c, j]
+            padded = torch.cat([line, line[-1] + (line[0] - line[-1]) * transport.ramp])
+            shift_px = transport.slopes_mm_per_rad[c // 2] * (theta[i] - theta[j]) / config.det_pixel_size_mm
+            moved = torch.fft.irfft(torch.fft.rfft(padded) * torch.exp(-1j * omega * shift_px), n=Lp)[:L]
+            expected[c] += a_hat[i, j] * moved
+    torch.testing.assert_close(dense[0, :, i], expected, atol=1e-6, rtol=1e-5)  # float32 phases
+
+
+def test_shift_transport_aligns_the_traces_of_its_depth(geom, config):
+    """Units and sign: a line whose content moves along the detector at t_f mm per radian (the trace of a point
+    at depth t_f) is aligned by stalk f: its aggregated message is the line itself, unblurred. The GCN, and the
+    stalk of opposite slope, average misaligned copies."""
+    transport = shift_transport(geom, config, num_stalks=8, k=12).double()
+    gcn = ViewTransport(geom.angles, "identity", num_stalks=8, k=12).double()
+    f = 6
+    slope = transport.slopes_mm_per_rad[f]                        # about 57 mm / rad
+    s = torch.arange(config.det_col_count, dtype=torch.float64)
+    theta = torch.as_tensor(geom.angles, dtype=torch.float64)
+    centre = 64.0 + slope * theta / config.det_pixel_size_mm       # pixels, moves ~0.6 px per view
+    trace = torch.exp(-0.5 * ((s[None, :] - centre[:, None]) / 2.0) ** 2)  # [V, L], blob of 2 px
+    x = torch.zeros(1, 16, geom.num_views, config.det_col_count, dtype=torch.float64)
+    x[0, 2 * f] = trace                                            # stalk f
+    x[0, 2 * (7 - f)] = trace                                      # stalk of opposite slope
+    i = 90                                                         # theta = 0: the blob is well inside the detector
+    weight = transport.a_hat[i].sum()
+
+    def error(messages, channel):
+        return ((messages[0, channel, i] / weight - trace[i]).norm() / trace[i].norm()).item()
+
+    shifted, averaged = transport(x), gcn(x)
+    assert transport.slopes_mm_per_rad[7 - f] == pytest.approx(-slope)
+    assert error(shifted, 2 * f) < 1e-6, "stalk f does not align the trace of slope t_f"
+    assert error(shifted, 2 * (7 - f)) > 0.3 and error(averaged, 2 * f) > 0.1, "misaligned copies should blur"
 
 
 @pytest.mark.parametrize("name", ["GCN", "SNN"])

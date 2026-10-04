@@ -27,6 +27,7 @@ __pycache__/
 *.jpeg
 *.svg
 *.pdf
+!results/figures/*.pdf
 *.tif
 *.tiff
 

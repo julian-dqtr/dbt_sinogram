@@ -4,15 +4,19 @@ The graph is fixed by the acquisition geometry (it does not depend on the data),
 built once and stored as dense [V, V] operators. With V = 180 views this is both exact and
 much faster than sparse message passing (no per-edge [E, C, L] message tensor).
 
-Shared by the two graph models of the ablation:
+Shared by the graph models of the ablation:
 
-- GCN  (transport="identity"):  m_i = sum_j  A_hat[i, j] *                       x_j
-- SNN  (transport="so2"):       m_i = sum_j  A_hat[i, j] * R(theta_i - theta_j)  x_j
+- GCN  (transport="identity"):  m_i = sum_j  A_hat[i, j] *                                x_j
+- SNN  (transport="shift"):     m_i = sum_j  A_hat[i, j] * S(t_f (theta_i - theta_j))   x_j
+- first SNN (transport="so2"):  m_i = sum_j  A_hat[i, j] * R(theta_i - theta_j)          x_j
 
-Both use exactly the same topology and the same normalised weights A_hat.
+S(delta) translates a detector line by delta (stalk f has its own trace slope t_f, see
+``build_shift_phases``); R is a rotation of every 2D stalk. All use exactly the same topology and
+the same normalised weights A_hat.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -104,7 +108,52 @@ def build_transport_operators(
         angles = torch.as_tensor(np.asarray(angles_rad), dtype=torch.float64)
         delta = angles.unsqueeze(1) - angles.unsqueeze(0)  # delta[i, j] = theta_i - theta_j
         return (a_hat * torch.cos(delta)).float(), (a_hat * torch.sin(delta)).float()
-    raise ValueError(f"Unknown transport: {transport}. Use 'identity' or 'so2'.")
+    raise ValueError(f"Unknown transport: {transport}. Use 'identity' or 'so2' (the shift transport works in Fourier space: build_shift_phases).")
+
+
+def shift_slopes(num_stalks: int, max_depth_mm: float) -> np.ndarray:
+    """Trace slopes ds/dtheta (mm / rad) of the shift transport, one per stalk, linearly spaced in
+    [-max_depth_mm, max_depth_mm].
+
+    In parallel beam a point of the object at depth t along the rays of view theta (its coordinate
+    along the ray direction, measured from the rotation centre) moves along the detector at the rate
+    |ds/dtheta| = |t|: its trace in the sinogram is a sinusoid of local slope +/- t. The bank covers every
+    depth of the reconstructed square (max_depth_mm = its half-diagonal), so every point has a stalk
+    whose slope matches its trace to within half the spacing of the bank.
+    """
+    return np.linspace(-max_depth_mm, max_depth_mm, num_stalks)
+
+
+def shift_padding(num_pixels: int, max_shift_px: float) -> int:
+    """Samples appended to every detector line before the FFT of the shift transport.
+
+    At least twice the largest translation of a message, so that whatever enters the detector comes from
+    the half of the padding next to the edge it enters through; odd total length, so that the real FFT
+    has no Nyquist bin and a fractional translation stays exactly invertible.
+    """
+    padding = 2 * math.ceil(max_shift_px) + 2
+    return padding + 1 if (num_pixels + padding) % 2 == 0 else padding
+
+
+def build_shift_phases(angles_rad, slopes_mm_per_rad, pixel_size_mm: float, padded_length: int) -> torch.Tensor:
+    """Fourier phases of the shift transport, [F, V, W, 2] float32 (real, imaginary), W = padded_length // 2 + 1.
+
+        phase[f, v, w] = exp(+i * omega_w * t_f * theta_v / pixel),   omega_w = 2 pi w / padded_length
+
+    For an edge j -> i the restriction maps translate stalk f along the detector by t_f (theta_i - theta_j)
+    (in mm, i.e. that divided by the pixel size in pixels): the content of view j is moved to where a point
+    whose trace has the slope t_f appears in view i (to first order in theta_i - theta_j, the shift-and-add
+    of tomosynthesis). The translation factorises as S(t_f theta_i) S(-t_f theta_j): multiplying the spectrum
+    of view j by phase[:, j] and the aggregated spectrum of view i by conj(phase[:, i]) applies it exactly,
+    circularly on the padded detector line. Like the SO(2) maps, it is a pure gauge (a flat connection), and
+    since a circular translation is orthogonal, R_ji = R_ij^T.
+    """
+    angles = torch.as_tensor(np.asarray(angles_rad), dtype=torch.float64)
+    slopes = torch.as_tensor(np.asarray(slopes_mm_per_rad), dtype=torch.float64)
+    omega = 2.0 * np.pi * torch.arange(padded_length // 2 + 1, dtype=torch.float64) / padded_length
+    gauge_shift_px = slopes[:, None] * angles[None, :] / pixel_size_mm  # [F, V]
+    phase_angle = omega[None, None, :] * gauge_shift_px[:, :, None]     # [F, V, W], in float64: up to ~300 rad
+    return torch.stack([torch.cos(phase_angle), torch.sin(phase_angle)], dim=-1).float()
 
 
 def angular_reach_deg(num_layers: int, k: int, angle_step_deg: float, graph_type: str = "knn") -> float:
