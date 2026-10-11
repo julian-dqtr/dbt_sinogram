@@ -26,6 +26,20 @@ def test_projected_views_get_exactly_the_regressed_moments(geom, clean_val_batch
     torch.testing.assert_close(projection(out, incomplete), out, atol=1e-6, rtol=0)
 
 
+def test_gradients_flow_through_the_projection(geom, clean_val_batch):
+    """train.py --projection_order K trains through the regression: the loss on P_K(prediction) must reach the
+    prediction, except along what the regression imposes. Without the shadow mask that is exact: on a missing view,
+    the gradient has no component along the correction atoms (grad @ synthesis = 0, since moments(synthesis) = I)."""
+    incomplete, full, _ = clean_val_batch
+    noisy = full + 0.05 * torch.randn(full.shape, generator=torch.Generator().manual_seed(0))
+    for projection in (HLCCMomentProjection(geom, max_order=4), HLCCMomentProjection(geom, max_order=4, support_threshold=None)):
+        prediction = noisy.clone().requires_grad_(True)
+        torch.nn.functional.mse_loss(projection(prediction, incomplete), full).backward()
+        assert prediction.grad is not None and torch.isfinite(prediction.grad).all() and prediction.grad.abs().sum() > 0
+    grad = prediction.grad.double()[:, :, _missing(geom)]
+    assert (grad @ projection.synthesis).abs().max() < 1e-5 * grad.abs().max()  # float32 input: rounding only
+
+
 def test_the_correction_stays_inside_the_shadow_of_the_object(geom, clean_val_batch):
     """Default behaviour: where the completed view is (almost) zero, nothing is added."""
     incomplete, full, _ = clean_val_batch

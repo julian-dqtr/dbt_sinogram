@@ -41,6 +41,53 @@ P6 (smoke test) sont reportés. Prochaine étape : la phase 1, que tu lances toi
 - **Critère (a)/(b).** Il reste celui du §4.2, fixé à l'avance. Le rapport le long du détecteur
   (GCN_L18 0,40 contre UNet2D 0,78) est rapporté comme observation exploratoire.
 
+**Règle de décision fixée le 05/10 à 17:10, avant l'évaluation sur le test (l'entraînement en était à l'epoch 105 et sa courbe de validation était visible) : P4 dans la boucle d'entraînement.**
+On compare `UNet2D_PL4_P4` (U-Net entraîné à travers P4, `train.py --projection_order 4`) à `UNet2D_P4` (le même
+U-Net, P4 appliqué seulement en post-traitement), sur les 200 échantillons de test.
+- **Mieux** si `UNet2D_PL4_P4` a une `mse_wedge` plus basse avec **chacune** des deux seeds (0 et 1), avec chaque fois un
+  Wilcoxon apparié p < 0,05, **et** un écart moyen plus grand que l'écart entre les deux seeds de `UNet2D_P4` (le bruit
+  d'un entraînement à l'autre du U-Net, inconnu jusqu'ici).
+- **Moins bien** dans la situation symétrique.
+- **Pas de différence démontrée** dans tous les autres cas, en particulier si le signe change avec la seed.
+- Avec la seule seed 0, le résultat est rapporté comme exploratoire, comme pour les GNN.
+- **Résultat (seed 0, test, 05/10), donc exploratoire.** `UNet2D_PL4_P4` 7,50e-4 contre `UNet2D_P4`
+  7,26e-4 : +3,4 %, meilleur sur 94 échantillons sur 200, p = 0,28. **Pas de différence démontrée.**
+  - Le run avec P4 dans la boucle fait un peu mieux près de la fenêtre (d ≤ 36°) et un peu moins
+    bien au bout du wedge.
+  - Sa sortie brute (`UNet2D_PL4`, 6,5e-3, résidu HLCC 0,32) montre que le réseau a bien laissé
+    l'ordre bas à la projection.
+  - Entraînement : 52 min, meilleur epoch 116.
+
+**Mise à jour du 05/10.**
+- **Seeds de la paire L18** (`launch_best_training.py --seed 1`, notebook §4 bis) : la seed change
+  l'initialisation et l'ordre des batchs, pas les fantômes.
+
+  | `mse_wedge` (test) | seed 0 | seed 1 | écart entre seeds |
+  |---|---|---|---|
+  | GCN_L18 | 2,40e-3 | 1,66e-3 | −31 % (176/200, p = 4e-25) |
+  | SNN_L18 | 1,93e-3 | 1,79e-3 | −7 % |
+  | SNN contre GCN | **−19,7 %** | **+7,9 %** (le GCN gagne, p = 6e-4) | |
+
+  **Le signe de l'écart SNN contre GCN change avec la seed.** Le même GCN_L18 varie de 31 % d'une
+  seed à l'autre : c'est plus que tout écart entre transports. On ne peut donc attribuer aucun
+  effet au transport. Le −20 % de la seed 0 venait d'un GCN resté dans un moins bon minimum (sa
+  loss d'entraînement était elle aussi plus haute). Leçon de méthode : les tests de Wilcoxon sur
+  les échantillons de test comparent deux **réseaux entraînés**, pas deux **architectures**. Un
+  même réseau change de 31 % avec p = 4e-25 en ne changeant que la seed.
+- **SNN_L6** (configuration GCN_L6, transport shift) : `mse_wedge` 9,27e-3, contre 9,13e-3 pour le
+  GCN (+1,5 %). Au-delà de 36°, sa sortie est indépendante des mesures, et son erreur est 1,39 fois
+  le plancher, comme pour le GCN. **La limite de portée est donc vérifiée sur les deux transports.**
+- **Bug corrigé dans le transport shift** (`snn_layers.ViewTransport`, test
+  `test_shift_transport_keeps_constant_lines_exactly_constant`).
+  - Le problème : sur les vues que l'information n'avait pas encore atteintes, la FFT laissait un
+    arrondi d'environ 1e-7 sur des lignes constantes. `ViewNorm` l'amplifiait en un motif
+    déterministe le long du détecteur, dont le réseau se servait comme indicateur de position.
+  - Le correctif, mathématiquement identique (écart de 1e-15 en float64), garde ces lignes
+    exactement constantes, comme pour le GCN.
+  - Décision : **pas de réentraînement**. Les checkpoints SNN, entraînés avant le correctif, sont
+    évalués avec l'opérateur corrigé. L'effet est de +9 % sur SNN_L6, dont l'avantage apparent de
+    −6,9 % sur le GCN venait de cet artefact, et de moins de 0,1 % sur L12 et L18.
+
 Règle d'or respectée : aucun nouveau modèle. On n'utilise que `SinoGCN` (transport identité) et
 `SinoSheafNet` (rotations $SO(2)$ codées en dur), déjà présents dans `src_2D/models/SinoSheavesNN/`.
 Le code ajouté en phase 0 sert uniquement à l'optimisation, à l'évaluation et aux figures.

@@ -116,6 +116,12 @@ class ViewTransport(nn.Module):
         B, C, V, L = x.shape
         if L != self.num_pixels:
             raise ValueError(f"The shift transport was built for {self.num_pixels} detector pixels, got {L}.")
+        # A constant line is invariant under every translation (its padding ramp is that same constant): only
+        # x - x[..., :1] goes through the FFT, the constants are aggregated directly. The same operator, but a constant
+        # line (a view no measurement has reached yet) stays exactly constant, as in the GCN, instead of carrying FFT
+        # rounding (~1e-7) that ViewNorm amplifies into a spurious detector-position signal (seen before 2026-10-05).
+        offset = x[..., :1]
+        x = x - offset
         # Periodic extension without a jump: the padding ramps linearly from the last pixel back to the first,
         # so that a circular translation brings in values close to the edge it crosses (like replicate padding)
         # and the FFT does not ring on a wrap-around discontinuity.
@@ -129,7 +135,8 @@ class ViewTransport(nn.Module):
         mixed = torch.einsum("ij,bcjwr->bciwr", self.a_hat, torch.view_as_real(gauged)).contiguous()
         # ... and back to the frame of view i: S(t_f theta_i). Net effect on an edge j -> i: S(t_f (theta_i - theta_j)).
         mixed = torch.view_as_complex(mixed).reshape(B, self.num_stalks, 2, V, W) * phase.conj()[None, :, None]
-        return torch.fft.irfft(mixed.reshape(B, C, V, W), n=self.padded_length, dim=-1)[..., :L]
+        moved = torch.fft.irfft(mixed.reshape(B, C, V, W), n=self.padded_length, dim=-1)[..., :L]
+        return moved + torch.einsum("ij,bcjl->bcil", self.a_hat, offset)
 
 
 class ViewGraphConv(nn.Module):

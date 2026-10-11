@@ -23,6 +23,7 @@ __pycache__/
 
 # Ignore standard images and plots
 *.png
+!results/figures/architectures/sinograms/*.png
 *.jpg
 *.jpeg
 *.svg
@@ -67,3 +68,6 @@ db/
 outputs/
 
 # Update
+
+# PlotNeuralNet (cloned, see scripts/plot_architectures.py)
+tools/PlotNeuralNet/

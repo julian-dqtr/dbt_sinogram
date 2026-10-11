@@ -500,13 +500,17 @@ utilise désormais le transport suggéré par le point 5 (`ViewTransport(transpo
   détecteur : `dirichlet_detector_ratio` vaut 0,40, contre 0,78 pour le U-Net. C'est la signature
   attendue d'une moyenne de traces mal alignées. Cette observation est **exploratoire** : le
   critère du plan, fixé à l'avance (rapport angulaire), reste inchangé.
-- **Résultat (test, 04/10, une seed).** À 18 couches, le SNN-shift réduit `mse_wedge` de 20 %
-  par rapport au GCN (meilleur sur 166 échantillons sur 200, p = 1e-21), à toutes les distances
-  de la fenêtre, et ce gain persiste après P4. À 12 couches, la différence n'est pas
-  significative (−3 %) : le SNN est moins bon près de la fenêtre et meilleur au bout du wedge.
-  Le flou le long du détecteur n'est presque pas corrigé (rapport médian de 0,44 contre 0,40).
-  Le gain ne vient donc pas principalement de là. Le critère fixé à l'avance n'est pas rempli
-  (`plan_experiences_gnn.md`, mise à jour du 03/10).
+- **Résultat (test, 05/10).** Aucun effet du transport n'est démontré.
+  - À 18 couches, le SNN-shift fait −20 % par rapport au GCN avec la seed 0, mais +8 % avec la
+    seed 1. Le même GCN varie lui-même de 31 % d'une seed à l'autre.
+  - À 12 couches, la différence n'est pas significative (−3 %).
+  - À 6 couches, la sortie du SNN au-delà de la portée est, comme celle du GCN, indépendante des
+    mesures, et son erreur est au-dessus du plancher.
+  - Le flou le long du détecteur n'est presque pas corrigé (rapport médian de 0,44 contre 0,40
+    à 18 couches).
+  - Le critère fixé à l'avance n'est pas rempli (`plan_experiences_gnn.md`, mises à jour des 03
+    et 05/10). Avec une connexion plate, le choix du repère (rotation ou décalage) ne pèse pas
+    plus que le bruit d'un entraînement à l'autre. La limite des GNN locaux reste la portée.
 - **Ce qu'il ne faut pas promettre.** Le décalage ne lève pas la limite de portée, et il
   n'invente pas la profondeur. Le réseau doit diriger chaque structure vers le stalk de la bonne
   pente, à partir d'une fenêtre de ±25° qui résout mal la profondeur.

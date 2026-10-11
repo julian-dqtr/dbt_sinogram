@@ -1,0 +1,5 @@
+Model,Moment regression,mse_wedge,img_psnr,img_ssim,hlcc_residual_1
+UNet2D,none,8.154e-04 ± 1.1e-03,23.35,0.5337,0.0121
+UNet2D_P4,after training,7.257e-04 ± 9.3e-04,23.41,0.5369,0.0019
+UNet2D_PL4,"in the training loop, raw network output",6.527e-03 ± 9.0e-03,22.87,0.4503,0.3153
+UNet2D_PL4_P4,in the training loop and at inference,7.503e-04 ± 1.0e-03,23.52,0.5345,0.0032

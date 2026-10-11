@@ -1,0 +1,307 @@
+
+\documentclass[border=8pt, multi, tikz]{standalone} 
+\usepackage{import}
+\subimport{../../../tools/PlotNeuralNet/layers/}{init}
+\usetikzlibrary{positioning}
+\usetikzlibrary{3d} %for including external image 
+
+\usetikzlibrary{calc,decorations.pathreplacing,fit}
+\def\IOColor{rgb:white,4;black,1}
+\def\ConvColor{rgb:yellow,5;red,2.5;white,5}
+\def\ActColor{rgb:yellow,5;red,5;white,5}
+\def\PoolColor{rgb:red,1;black,0.3}
+\def\UpColor{rgb:blue,2;green,1;black,0.3}
+\def\CopyColor{rgb:white,1;black,3}
+\def\OutColor{rgb:magenta,5;black,7}
+\def\GraphColor{rgb:blue,5;green,2.5;white,5}
+\def\GraphActColor{rgb:blue,5;green,5;white,3}
+\def\SumColor{rgb:blue,5;green,15}
+\def\DCColor{rgb:red,2;blue,5;white,2}
+\def\HLCCColor{rgb:green,3;blue,1;white,8}
+
+\newcommand{\copymidarrow}{\tikz \draw[-Stealth,line width=0.8mm,draw={rgb:blue,4;red,1;green,1;black,3}] (-0.3,0) -- ++(0.3,0);}
+
+\begin{document}
+\begin{tikzpicture}
+\tikzstyle{connection}=[ultra thick,every node/.style={sloped,allow upside down},draw=\edgecolor,opacity=0.7]
+\tikzstyle{copyconnection}=[ultra thick,every node/.style={sloped,allow upside down},draw={rgb:blue,4;red,1;green,1;black,3},opacity=0.7]
+
+\tikzstyle{bus}=[ultra thick,-Stealth,draw={rgb:blue,4;red,1;green,1;black,3},opacity=0.7,rounded corners=4pt]
+\tikzstyle{op}=[draw=black!60,fill=\HLCCColor,rounded corners=3pt,align=flush center,font=\small,inner sep=4pt]
+
+\pic[shift={(0,0,0)}] at (0,0,0)
+    {Box={name=in,
+        caption={},
+        xlabel={{"2",}},
+        zlabel={},
+        fill=\IOColor,
+        opacity=0.6,
+        height=32.0,
+        width=0.6,
+        depth=22.8}};
+
+\node[below=12pt,align=center,font=\small] at (in-nearsoutheast) {\textbf{$y$ + acquired flag}\\$180\times128$};
+
+\pic[shift={(2.4,0,0)}] at (in-east)
+    {RightBandedBox={name=enc,
+        caption={Encoder},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\draw [connection]  (in-east)    -- node {\midarrow} (enc-west);
+
+\pic[shift={(1.2,0,0)}] at (enc-east)
+    {RightBandedBox={name=b1c1,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (b1c1-east)
+    {RightBandedBox={name=b1g,
+        caption={Block $1$},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\GraphColor,
+        bandfill=\GraphActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (b1g-east)
+    {Box={name=b1c2,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        opacity=0.9,
+        height=32.0,
+        width=3.6,
+        depth=22.8}};
+
+\pic[shift={(1.0,0,0)}] at (b1c2-east)
+    {Ball={name=b1s,
+        fill=\SumColor,
+        opacity=0.6,
+        radius=1.8,
+        logo={$+$},
+        caption={}}};
+
+\draw [connection]  (b1c2-east)    -- node {\midarrow} (b1s-west);
+
+\draw[bus] ($(b1c1-west)+(-0.5,0)$) -- ++(0,4.1000000000000005) -| (b1s-north);
+
+\draw [connection]  (enc-east)    -- node {\midarrow} (b1c1-west);
+
+\pic[shift={(1.2,0,0)}] at (b1s-east)
+    {RightBandedBox={name=b2c1,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (b2c1-east)
+    {RightBandedBox={name=b2g,
+        caption={Block $2$},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\GraphColor,
+        bandfill=\GraphActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (b2g-east)
+    {Box={name=b2c2,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        opacity=0.9,
+        height=32.0,
+        width=3.6,
+        depth=22.8}};
+
+\pic[shift={(1.0,0,0)}] at (b2c2-east)
+    {Ball={name=b2s,
+        fill=\SumColor,
+        opacity=0.6,
+        radius=1.8,
+        logo={$+$},
+        caption={}}};
+
+\draw [connection]  (b2c2-east)    -- node {\midarrow} (b2s-west);
+
+\draw[bus] ($(b2c1-west)+(-0.5,0)$) -- ++(0,4.1000000000000005) -| (b2s-north);
+
+\draw [connection]  (b1s-east)    -- node {\midarrow} (b2c1-west);
+
+\pic[shift={(3.2,0,0)}] at (b2s-east)
+    {RightBandedBox={name=bLc1,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (bLc1-east)
+    {RightBandedBox={name=bLg,
+        caption={Block $L$},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\GraphColor,
+        bandfill=\GraphActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.6},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (bLg-east)
+    {Box={name=bLc2,
+        caption={},
+        xlabel={{"64",}},
+        zlabel={},
+        fill=\ConvColor,
+        opacity=0.9,
+        height=32.0,
+        width=3.6,
+        depth=22.8}};
+
+\pic[shift={(1.0,0,0)}] at (bLc2-east)
+    {Ball={name=bLs,
+        fill=\SumColor,
+        opacity=0.6,
+        radius=1.8,
+        logo={$+$},
+        caption={}}};
+
+\draw [connection]  (bLc2-east)    -- node {\midarrow} (bLs-west);
+
+\draw[bus] ($(bLc1-west)+(-0.5,0)$) -- ++(0,4.1000000000000005) -| (bLs-north);
+
+\draw[connection] (b2s-east) -- node[fill=white,text opacity=1,fill opacity=1] {\Large$\cdots$} (bLc1-west);
+
+\draw[decorate,decoration={brace,mirror,amplitude=8pt},thick]
+    ($(b1c1-west |- b1c1-south)+(-0.6,-2.3)$) -- ($(bLs-east |- b1c1-south)+(0.2,-2.3)$)
+    node[midway,below=10pt,font=\small] {$\times L$ blocks: angular reach $L\,k/2 = 6L$ views};
+
+\pic[shift={(1.4,0,0)}] at (bLs-east)
+    {RightBandedBox={name=dec1,
+        caption={Decoder},
+        xlabel={{"32",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={3.0},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (dec1-east)
+    {RightBandedBox={name=dec2,
+        caption={},
+        xlabel={{"16",}},
+        zlabel={},
+        fill=\ConvColor,
+        bandfill=\ActColor,
+        opacity=0.9,
+        height=32.0,
+        width={2.4},
+        depth=22.8}};
+
+\pic[shift={(0,0,0)}] at (dec2-east)
+    {Box={name=dec3,
+        caption={},
+        xlabel={{"1",}},
+        zlabel={},
+        fill=\ConvColor,
+        opacity=0.9,
+        height=32.0,
+        width=0.6,
+        depth=22.8}};
+
+\pic[shift={(1.6,0,0)}] at (dec3-east)
+    {Ball={name=dc,
+        fill=\DCColor,
+        opacity=0.6,
+        radius=2.5,
+        logo={\scriptsize\textsf{DC}},
+        caption={}}};
+
+\pic[shift={(1.6,0,0)}] at (dc-east)
+    {Box={name=out,
+        caption={},
+        xlabel={{"1",}},
+        zlabel={},
+        fill=\IOColor,
+        opacity=0.6,
+        height=32.0,
+        width=0.6,
+        depth=22.8}};
+
+\node[below=12pt,align=center,font=\small] at (out-nearsoutheast) {\textbf{Completed}\\$180\times128$};
+
+\draw [connection]  (bLs-east)    -- node {\midarrow} (dec1-west);
+
+\draw [connection]  (dec3-east)    -- node {\midarrow} (dc-west);
+
+\draw [connection]  (dc-east)    -- node {\midarrow} (out-west);
+
+\draw[bus] (in-south) -- ++(0,-5.6) -| (dc-south)
+    node[pos=0.25,below,font=\small,opacity=1] {measured sinogram $y$: data consistency};
+
+\begin{scope}[shift={($(b1g-north)+(1.0,6.2)$)}]
+    \draw[dashed,rounded corners,black!50] (-5.0,-1.9) rectangle (5.0,2.6);
+    \foreach \j in {0,...,6} {
+        \node[circle,draw=black!70,fill=\GraphColor,minimum size=0.42cm,inner sep=0pt] (v\j) at ({1.15*(\j-3)},0) {};
+    }
+    \node[circle,draw=black,very thick,fill=\GraphActColor,minimum size=0.42cm,inner sep=0pt] at (v3) {};
+    \node at (-4.3,0) {$\cdots$};  \node at (4.3,0) {$\cdots$};
+    \foreach \j in {0,1,2} { \draw[-Stealth,thick,draw=\edgecolor] (v\j) to[bend left=50] (v3); }
+    \foreach \j in {4,5,6} { \draw[-Stealth,thick,draw=\edgecolor] (v\j) to[bend right=50] (v3); }
+    \node[below=1pt,font=\small] at (v3.south) {$i$};
+    \node[font=\small] at (0,2.05) {graph conv on the view graph ($k/2=6$ neighbours per side)};
+    \node[font=\small] at (0,-0.85) {$m_i=\sum_{j}\hat A_{ij}\,T_{ij}\,x_j, \qquad x_i \leftarrow \mathrm{Conv}_{1\times1}([x_i;\,m_i])$};
+    \node[font=\small] at (0,-1.45) {GCN: $T_{ij}=I$ \qquad SNN: $T_{ij}=S\big(t_f(\theta_i-\theta_j)\big)$ (shift along the detector)};
+\end{scope}
+\draw[dashed,black!50] ($(b1g-north)+(1.0,4.3)$) -- (b1g-north);
+
+\begin{scope}[shift={($(in-west)+(0,-10.4)$)}]
+\filldraw[fill=\ConvColor,fill opacity=0.7,draw=black!60] (0.0,0.0) rectangle ++(0.45,0.4);
+\filldraw[fill=\ActColor,fill opacity=0.7,draw=black!60] (0.45,0.0) rectangle ++(0.15,0.4);
+\node[anchor=west,font=\small] at (0.7,0.2) {conv $1\times3$ along the detector + (ViewNorm +) GELU};
+\filldraw[fill=\GraphColor,fill opacity=0.7,draw=black!60] (9.5,0.0) rectangle ++(0.45,0.4);
+\filldraw[fill=\GraphActColor,fill opacity=0.7,draw=black!60] (9.95,0.0) rectangle ++(0.15,0.4);
+\node[anchor=west,font=\small] at (10.2,0.2) {graph conv between views + ViewNorm + GELU};
+\shade[ball color=\SumColor] (19.3,0.2) circle (0.22);
+\node[anchor=west,font=\small] at (19.7,0.2) {residual connection};
+\shade[ball color=\DCColor] (0.3,-0.6000000000000001) circle (0.22);
+\node[anchor=west,font=\small] at (0.7,-0.6000000000000001) {data consistency (measured views kept)};
+\draw[bus] (9.5,-0.6000000000000001) -- ++(0.6,0);
+\node[anchor=west,font=\small] at (10.2,-0.6000000000000001) {identity path};
+\end{scope}
+
+\end{tikzpicture}
+\end{document}

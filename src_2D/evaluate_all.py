@@ -61,6 +61,9 @@ DEFAULT_MODELS = [
     "SNN_L6", "SNN_L12", "SNN_L18", "SNN_L6_P4", "SNN_L12_P4", "SNN_L18_P4",
     # seed-1 replicas of the L18 pair (scripts/launch_best_training.py --seed 1): the run-to-run noise
     "GCN_L18_S1", "SNN_L18_S1", "GCN_L18_S1_P4", "SNN_L18_S1_P4",
+    # U-Net trained THROUGH the moment regression (train.py --projection_order 4): its prediction is "_PL4_P4";
+    # "_PL4" alone is the raw network output, shown to see what the network leaves to the regression
+    "UNet2D_PL4", "UNet2D_PL4_P4",
 ]
 GROUND_TRUTH = "GroundTruth"  # column of per_view_var.csv
 HLCC_METRIC_ORDER = 4         # highest order of the hlcc_residual_<n> columns

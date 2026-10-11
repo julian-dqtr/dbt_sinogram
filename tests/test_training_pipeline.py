@@ -14,6 +14,7 @@ from src_2D.train import build_parser, run_training
     ["--model", "GCN", "--num_layers", "2", "--num_stalks", "4"],
     ["--model", "SNN", "--num_layers", "2", "--num_stalks", "4", "--physics", "hlcc"],
     ["--model", "UNet2dHLCC", "--filters", "8", "--hlcc_max_order", "3", "--train_repeats", "2"],
+    ["--model", "UNet2D", "--filters", "8", "--projection_order", "4"],
 ])
 def test_train_save_reload(model_args, tmp_path, device):
     if device.type != "cuda":

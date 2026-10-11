@@ -41,6 +41,7 @@ from src_2D.models.factory import GRAPH_MODELS, LEARNED_MODELS, build_model, def
 from src_2D.models.SinoSheavesNN.physics_loss import AnnealedLoss
 from src_2D.utils.checkpoint import save_checkpoint
 from src_2D.utils.evaluation import generate_example_figure, save_random_dataset_preview, save_training_curve
+from src_2D.utils.hlcc import HLCCMomentProjection
 from src_2D.utils.metrics import METRIC_KEYS, sinogram_metrics
 
 # The Tesla K80 (Kepler) is not supported by the cuDNN shipped with recent PyTorch builds.
@@ -87,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda_high", type=float, default=1e-3, help="Shared weight of the HLCC orders >= 2")
     parser.add_argument("--hlcc_max_order", type=int, default=1, help="Highest HLCC order of the physics loss (1: orders 0 and 1)")
     parser.add_argument("--anneal_epochs", type=int, default=20)
+    # HLCC moment regression INSIDE the training loop (src_2D/utils/hlcc.py): the loss and the checkpoint selection see
+    # P_K(model(x)), so the network only has to learn what the regression does not fix. Evaluate as <run>_PL<K>_P<K>.
+    parser.add_argument("--projection_order", type=int, default=None,
+                        help="Train through the HLCC moment regression of orders 0..K (run saved as <run>_PL<K>)")
     # Outputs / logging
     parser.add_argument("--run_name", type=str, default=None, help="Defaults to <model> or <model>_L<num_layers>")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
@@ -193,6 +198,8 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
 
     model_config = model_config_from_args(args)
     run_name = args.run_name or default_run_name(args.model, model_config)
+    if args.run_name is None and args.projection_order is not None:
+        run_name += f"_PL{args.projection_order}"
     checkpoint_dir = args.checkpoint_dir or PROJECT_ROOT / "outputs/2d/checkpoints" / run_name
     args.figures_dir = args.figures_dir or PROJECT_ROOT / "outputs/2d/visualisation" / run_name
 
@@ -216,6 +223,13 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     ddp_model = DDP(model, device_ids=[device.index]) if is_distributed else model
 
+    projection = HLCCMomentProjection(geom, args.projection_order).to(device) if args.projection_order is not None else None
+
+    def complete(network, incomplete: torch.Tensor) -> torch.Tensor:
+        """What the loss and the checkpoint selection see: the network, then the moment regression if any."""
+        completed = network(incomplete)
+        return projection(completed, incomplete) if projection is not None else completed
+
     physics = uses_physics(args)
     loss_fn = AnnealedLoss(geom, args.lambda_m0, args.lambda_m1, args.anneal_epochs,
                            lambda_high=args.lambda_high, max_order=args.hlcc_max_order).to(device)
@@ -230,6 +244,9 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     if is_main:
         print(f"[{run_name}] {num_params:,} parameters | physics={physics} {calibration} | world_size={world_size} | device={device}")
         print(f"[{run_name}] training set: {args.n_samples} phantoms x {args.train_repeats} pass(es) per epoch")
+        if projection is not None:
+            print(f"[{run_name}] trained through the HLCC moment regression of orders 0..{args.projection_order}: "
+                  f"evaluate it as {run_name}_P{args.projection_order}")
         if hasattr(model, "angular_reach_deg"):
             print(f"[{run_name}] angular reach = {model.angular_reach_deg:.1f} deg "
                   f"(farthest missing view: {np.rad2deg(np.abs(geom.angles[missing_views]).max()) - geometry_config.angle_max_deg:.1f} deg from the acquired window)")
@@ -268,7 +285,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
             if args.max_train_batches and step >= args.max_train_batches:
                 break
             incomplete, target = incomplete.to(device), target.to(device)
-            pred = ddp_model(incomplete)
+            pred = complete(ddp_model, incomplete)
             if physics:
                 loss, l_mse, l_physics = loss_fn(pred[:, 0], target[:, 0], epoch - 1)
             else:
@@ -292,7 +309,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
 
         # ---- Validate ----
         ddp_model.eval()
-        val = evaluate(model, val_loader, missing_views, device, is_distributed)
+        val = evaluate(lambda x: complete(model, x), val_loader, missing_views, device, is_distributed)
         history.append({"epoch": epoch, **train_log, **{f"val/{k}": v for k, v in val.items()}})
 
         improved = best is None or val[SELECTION_METRIC] < best[SELECTION_METRIC]
@@ -312,6 +329,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
                 save_checkpoint(
                     checkpoint_dir / "best_model.pt", model, args.model, model_config, geometry_config,
                     meta={"epoch": epoch, "val_metrics": val, "baselines": baselines, "physics": physics,
+                          "projection_order": args.projection_order,
                           "calibration": calibration, "num_params": num_params,
                           "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}},
                 )
@@ -337,7 +355,7 @@ def run_training(args, trial=None, save: bool = True) -> Dict[str, float]:
     if is_main and save:
         stats = {"training_time_seconds": training_time, "world_size": world_size, "num_params": num_params, **hardware,
                  "n_samples": args.n_samples, "train_repeats": args.train_repeats,
-                 "best": best, "baselines": baselines, "epochs_run": len(history)}
+                 "projection_order": args.projection_order, "best": best, "baselines": baselines, "epochs_run": len(history)}
         (checkpoint_dir / "training_stats.json").write_text(json.dumps(stats, indent=2))
         (checkpoint_dir / "history.json").write_text(json.dumps(history, indent=2))
         save_training_curve([h["train/loss"] for h in history], args)

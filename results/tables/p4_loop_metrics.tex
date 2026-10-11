@@ -1,0 +1,11 @@
+\begin{tabular}{llllll}
+\toprule
+ & Moment regression & mse\_wedge & img\_psnr & img\_ssim & hlcc\_residual\_1 \\
+Model &  &  &  &  &  \\
+\midrule
+UNet2D & none & 8.154e-04 $\pm$ 1.1e-03 & 23.35 & 0.5337 & 0.0121 \\
+UNet2D\_P4 & after training & 7.257e-04 $\pm$ 9.3e-04 & 23.41 & 0.5369 & 0.0019 \\
+UNet2D\_PL4 & in the training loop, raw network output & 6.527e-03 $\pm$ 9.0e-03 & 22.87 & 0.4503 & 0.3153 \\
+UNet2D\_PL4\_P4 & in the training loop and at inference & 7.503e-04 $\pm$ 1.0e-03 & 23.52 & 0.5345 & 0.0032 \\
+\bottomrule
+\end{tabular}

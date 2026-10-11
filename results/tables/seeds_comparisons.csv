@@ -1,0 +1,6 @@
+Comparison,mse_wedge,Change,Better on,Wilcoxon p
+GCN_L18: seed 1 vs seed 0 (same configuration),2.40e-03 → 1.66e-03,-30.7 %,176 / 200,3.9e-25
+SNN_L18: seed 1 vs seed 0 (same configuration),1.93e-03 → 1.79e-03,-6.9 %,114 / 200,0.005
+"SNN_L18 vs GCN_L18, seed 0",2.40e-03 → 1.93e-03,-19.7 %,166 / 200,1.1e-21
+"SNN_L18 vs GCN_L18, seed 1",1.66e-03 → 1.79e-03,+7.9 %,76 / 200,0.00061
+"SNN_L18 vs GCN_L18, mean over seeds [0, 1]",2.03e-03 → 1.86e-03,-8.4 %,122 / 200,7e-07

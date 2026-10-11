@@ -119,6 +119,17 @@ def test_shift_aggregation_matches_an_explicit_edge_loop(geom, config):
     torch.testing.assert_close(dense[0, :, i], expected, atol=1e-6, rtol=1e-5)  # float32 phases
 
 
+def test_shift_transport_keeps_constant_lines_exactly_constant(geom, config):
+    """A view no measurement has reached carries constant detector lines: like the GCN, the shift transport must keep
+    them exactly constant. FFT rounding left on them (~1e-7) was amplified by ViewNorm into a detector-position signal."""
+    torch.manual_seed(0)
+    transport = shift_transport(geom, config)
+    lines = torch.rand(2, 8, geom.num_views, 1).expand(2, 8, geom.num_views, config.det_col_count).contiguous()
+    messages = transport(lines)
+    assert torch.equal(messages, messages[..., :1].expand_as(messages)), "a constant line picked up a detector pattern"
+    torch.testing.assert_close(messages[..., 0], torch.einsum("ij,bcj->bci", transport.a_hat, lines[..., 0]))
+
+
 def test_shift_transport_aligns_the_traces_of_its_depth(geom, config):
     """Units and sign: a line whose content moves along the detector at t_f mm per radian (the trace of a point
     at depth t_f) is aligned by stalk f: its aggregated message is the line itself, unblurred. The GCN, and the

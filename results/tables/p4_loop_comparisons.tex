@@ -1,0 +1,10 @@
+\begin{tabular}{lllll}
+\toprule
+ & mse\_wedge & Change & Better on & Wilcoxon p \\
+Comparison &  &  &  &  \\
+\midrule
+UNet2D\_PL4\_P4 vs UNet2D\_P4 (through P4 vs P4 after training) & 7.26e-04 $\rightarrow$ 7.50e-04 & +3.4 \% & 94 / 200 & 0.28 \\
+UNet2D\_PL4\_P4 vs UNet2D (through P4 vs no regression) & 8.15e-04 $\rightarrow$ 7.50e-04 & -8.0 \% & 123 / 200 & 0.00025 \\
+UNet2D\_P4 vs UNet2D (P4 after training vs no regression) & 8.15e-04 $\rightarrow$ 7.26e-04 & -11.0 \% & 189 / 200 & 1.8e-31 \\
+\bottomrule
+\end{tabular}
